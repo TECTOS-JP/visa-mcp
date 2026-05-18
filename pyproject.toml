@@ -1,0 +1,52 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "visa-mcp"
+version = "0.1.0"
+description = "MCP server for controlling GPIB / USB / Serial / LAN instruments via PyVISA. Define commands per-instrument with YAML."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+keywords = ["mcp", "pyvisa", "gpib", "scpi", "instrument-control", "laboratory-automation", "fastmcp", "claude"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering",
+    "Topic :: System :: Hardware",
+]
+dependencies = [
+    "fastmcp>=2.0.0",
+    "pyvisa>=1.14.0",
+    "pydantic>=2.0.0",
+    "pyyaml>=6.0",
+    "pdfplumber>=0.10",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+    "pytest-mock>=3.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/<your-username>/visa-mcp"
+Issues = "https://github.com/<your-username>/visa-mcp/issues"
+
+[project.scripts]
+visa-mcp = "visa_mcp.server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/visa_mcp"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

@@ -1,0 +1,96 @@
+# =============================================================
+# GPIB MCP サーバー 機器定義ファイル テンプレート
+# =============================================================
+# このファイルをコピーして instruments/<メーカー>_<モデル>.yaml として保存する。
+# アンダースコア(_)で始まるファイルはロード対象外（このテンプレート自体は読み込まれない）。
+# 必須フィールドには "# *必須" とコメントを付記している。
+# =============================================================
+
+metadata:
+  manufacturer: "Tektronix"         # *必須: 表示用メーカー名
+  model: "TDS 210"                  # *必須: 表示用モデル名
+  description: "2ch 60MHz DSO"      # 機器の説明（省略可）
+  manual_ref: "TDS210_Programmer_Manual.pdf"  # 参照 PDF ファイル名（省略可）
+
+identification:                     # *IDN? 応答との照合ルール
+  # *IDN? 応答形式: MANUFACTURER,MODEL,SERIAL_NUMBER,FIRMWARE_VERSION
+  # 例: "TEKTRONIX,TDS 210,C012345,V1.00"
+  manufacturer_match: "TEKTRONIX"   # メーカー文字列（大文字・部分一致）
+  model_regex: "TDS.?210"           # モデル照合の正規表現
+
+connection:
+  default_timeout_ms: 5000          # デフォルトタイムアウト（ミリ秒）
+  read_termination: "\n"            # 読み取り終端文字
+  write_termination: "\n"           # 書き込み終端文字
+  # --- シリアルポート（ASRL）接続の場合のみ設定 ---
+  serial:
+    baud_rate: 9600
+    data_bits: 8
+    parity: "N"                     # N=なし / E=偶数 / O=奇数
+    stop_bits: 1
+    flow_control: "none"            # none / xon_xoff / rts_cts
+
+commands:
+  # キー名 = execute_named_command で指定する command_name（snake_case 推奨）
+
+  # --- クエリ（応答あり）の例 ---
+  identify:
+    scpi: "*IDN?"                   # *必須: SCPI コマンド文字列
+    type: "query"                   # *必須: "query"（応答あり）or "write"（応答なし）
+    description: "機器識別情報を返す" # *必須: コマンドの説明
+    parameters: []                  # パラメータなしの場合は空リスト
+    returns:
+      type: "string"                # none / integer / float / boolean / string
+      unit: ""
+      description: "MANUFACTURER,MODEL,SERIAL,FIRMWARE 形式の文字列"
+
+  measure_channel_voltage:
+    scpi: "MEASure:VOLTage? CH{channel}"
+    # パラメータは {パラメータ名} でプレースホルダ指定
+    type: "query"
+    description: "指定チャンネルの電圧を測定する"
+    parameters:
+      - name: channel               # *必須: パラメータ名（{} 内の名前と一致させる）
+        description: "測定チャンネル番号"
+        type: "integer"             # integer / float / string / enum
+        required: true
+        range: [1, 2]               # integer / float の場合: [最小値, 最大値]
+        # choices: ["CH1", "CH2"]   # type: "enum" の場合はこちらを使用
+    returns:
+      type: "float"
+      unit: "V"
+      description: "測定電圧値"
+
+  set_timebase_scale:
+    scpi: "HORizontal:SCAle {scale}"
+    type: "write"
+    description: "時間軸スケールを設定する（1DIVあたりの秒数）"
+    parameters:
+      - name: scale
+        description: "時間軸スケール（秒/DIV）"
+        type: "float"
+        required: true
+        range: [5.0e-9, 5.0]        # 5ns 〜 5s
+
+  reset:
+    scpi: "*RST"
+    type: "write"
+    description: "機器を工場出荷時設定にリセットする"
+    parameters: []
+
+  autoset:
+    scpi: "AUTOSet EXECute"
+    type: "write"
+    description: "オートスケールを実行する"
+    parameters: []
+    timeout_ms: 15000               # このコマンドだけ長めのタイムアウト（省略時は default_timeout_ms）
+
+  get_status_byte:
+    scpi: "*STB?"
+    type: "query"
+    description: "ステータスバイトを読み取る"
+    parameters: []
+    returns:
+      type: "integer"
+      unit: ""
+      description: "ステータスバイト値（0-255）"

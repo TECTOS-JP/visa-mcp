@@ -7,7 +7,9 @@
 
 LLM（Claude Code / Claude Desktop など MCP 対応クライアント）から、SCPI 計測器と非 SCPI 計測器の両方を統一的に操作できるサーバーです。マニュアルから抽出したコマンドを YAML で定義すれば、機器固有の知識なしに自然言語で計測を自動化できます。
 
-📝 **背景・設計思想・実機検証の詳細**: [Note 記事「Claude から計測器を動かす ── visa-mcp の設計と実機検証」](https://note.com/kkondou_tectos/n/n3fba2f27c31c)
+📝 **記事**
+- [v0.3.0: 計測器を「指示で動かす」から「手順ごと預ける」へ](https://note.com/kkondou_tectos/n/nb23422933286) — Recipes / 応答パーサ / 安全制約
+- [v0.1.0: Claude から計測器を動かす ── 設計と実機検証](https://note.com/kkondou_tectos/n/n3fba2f27c31c) — 設計思想と Yokogawa 7563 救出記
 
 ## 特徴
 

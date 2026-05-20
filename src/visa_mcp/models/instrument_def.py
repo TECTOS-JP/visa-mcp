@@ -17,6 +17,7 @@ class ReturnDefinition(BaseModel):
     type: Literal["none", "integer", "float", "boolean", "string"] = "string"
     unit: str = ""
     description: str = ""
+    format: str = ""                       # v0.3.0: response_formats のキーを参照
 
 
 class CommandDefinition(BaseModel):
@@ -115,6 +116,54 @@ class ResponseFormat(BaseModel):
     # fields 例: {"unit": {"C": "celsius", "K": "kelvin"}}
 
 
+# ===== Recipe / 物理インタフェース / 動作状態 (v0.3.0) =====
+
+class RecipeStep(BaseModel):
+    """recipe の 1 ステップ"""
+    command: str                            # YAML commands のキーを参照
+    args: dict[str, Any] = Field(default_factory=dict)
+    # args の値は文字列の場合 "$varname" や "$var * 1.1" のような式評価が可能
+    description: str = ""
+
+
+class RecipeDefinition(BaseModel):
+    """複数コマンドを安全な順序で実行する典型ワークフロー"""
+    description: str = ""
+    parameters: list[ParameterDefinition] = Field(default_factory=list)
+    steps: list[RecipeStep] = Field(default_factory=list)
+
+
+class PhysicalTerminal(BaseModel):
+    """物理端子の情報"""
+    label: str
+    type: str = ""                          # banana_jack / BNC / GPIB-24pin / USB-B 等
+    color: str = ""                         # red / black / yellow 等
+    max_voltage_to_gnd: float | None = None
+    description: str = ""
+
+
+class PhysicalInterface(BaseModel):
+    """物理コネクタ・端子情報"""
+    front_panel: list[PhysicalTerminal] = Field(default_factory=list)
+    rear_panel: list[PhysicalTerminal] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+
+
+class OperationalMode(BaseModel):
+    """動作モード (例: CV/CC、Local/Remote)"""
+    name: str
+    description: str = ""
+    indicator: str = ""                     # 状態を確認する SCPI クエリ・bit など
+
+
+class OperationalStates(BaseModel):
+    """状態機械・推奨手順"""
+    startup_sequence: list[str] = Field(default_factory=list)
+    shutdown_sequence: list[str] = Field(default_factory=list)
+    modes: list[OperationalMode] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+
+
 # ===== ルート定義 =====
 
 class InstrumentDefinition(BaseModel):
@@ -126,6 +175,10 @@ class InstrumentDefinition(BaseModel):
     safety: SafetyConfig = Field(default_factory=SafetyConfig)
     specifications: SpecificationConfig = Field(default_factory=SpecificationConfig)
     response_formats: dict[str, ResponseFormat] = Field(default_factory=dict)
+    # v0.3.0 追加
+    recipes: dict[str, RecipeDefinition] = Field(default_factory=dict)
+    operational_states: OperationalStates = Field(default_factory=OperationalStates)
+    physical_interface: PhysicalInterface = Field(default_factory=PhysicalInterface)
 
     @property
     def display_name(self) -> str:

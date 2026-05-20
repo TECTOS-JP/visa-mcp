@@ -4,6 +4,7 @@ from visa_mcp.session_manager import SessionManager
 from visa_mcp.visa_manager import VisaError
 from visa_mcp.utils.param_validator import validate_and_build_scpi, ParameterValidationError
 from visa_mcp import safety as sf
+from visa_mcp.response_parser import parse_with_definition
 
 
 def register_tools(mcp: FastMCP, session_mgr: SessionManager) -> None:
@@ -150,15 +151,20 @@ def register_tools(mcp: FastMCP, session_mgr: SessionManager) -> None:
                 )
                 result = _cast_response(raw, cmd_def.returns.type)
                 session.record_command(command_name)
+                data = {
+                    "command_name": command_name,
+                    "scpi_sent": scpi,
+                    "raw_response": raw,
+                    "value": result,
+                    "unit": cmd_def.returns.unit,
+                }
+                # v0.3.0: 応答フォーマット指定があれば構造化パースを追加
+                if cmd_def.returns.format:
+                    parsed = parse_with_definition(raw, session.definition, cmd_def.returns.format)
+                    data["parsed"] = parsed
                 return {
                     "success": True,
-                    "data": {
-                        "command_name": command_name,
-                        "scpi_sent": scpi,
-                        "raw_response": raw,
-                        "value": result,
-                        "unit": cmd_def.returns.unit,
-                    },
+                    "data": data,
                     "safety_violations_overridden": list(violations) if violations else [],
                 }
             else:

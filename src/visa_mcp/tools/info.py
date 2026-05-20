@@ -36,6 +36,11 @@ def register_tools(mcp: FastMCP, session_mgr: SessionManager) -> None:
                 "safety": d.safety.model_dump(),
                 "specifications": d.specifications.model_dump(),
                 "response_formats": {k: v.model_dump() for k, v in d.response_formats.items()},
+                # v0.3.0: 新セクション
+                "operational_states": d.operational_states.model_dump(),
+                "physical_interface": d.physical_interface.model_dump(),
+                "recipes": {k: v.model_dump() for k, v in d.recipes.items()},
+                "recipe_count": len(d.recipes),
                 "command_count": len(d.commands),
                 "command_names": list(d.commands.keys()),
                 "safety_mode": sf.get_safety_mode(),

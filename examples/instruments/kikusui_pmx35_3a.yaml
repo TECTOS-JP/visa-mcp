@@ -108,6 +108,77 @@ response_formats:
     description: "SYST:ERR? の応答形式。例: +0,\"No error\""
     fields: {}
 
+# ===== 動作状態・推奨手順 (v0.3.0) =====
+operational_states:
+  startup_sequence:
+    - "*RST で初期化"
+    - "VOLT:PROT で OVP を設定"
+    - "CURR:PROT で OCP を設定"
+    - "VOLT / CURR で出力値を設定"
+    - "OUTP ON で出力開始"
+  shutdown_sequence:
+    - "OUTP OFF で出力停止"
+    - "（必要に応じて *SAV でプリセット保存）"
+  modes:
+    - name: "CV"
+      description: "定電圧モード。負荷が CC リミット未満の通常動作。STAT:OPER bit 8"
+      indicator: "STAT:OPER:COND?"
+    - name: "CC"
+      description: "定電流モード。負荷が CC リミットに到達した状態。STAT:OPER bit 10"
+      indicator: "STAT:OPER:COND?"
+    - name: "Local"
+      description: "フロントパネル操作可能な状態"
+    - name: "Remote"
+      description: "リモート制御中、パネルキーロック可能"
+  notes:
+    - "電源投入時の出力状態は OUTP:PON で設定 (SAFE/AUTO/FORCE)"
+    - "アラーム発生時は OUTP:PROT:CLE で解除可能"
+
+# ===== 物理インタフェース (v0.3.0) =====
+physical_interface:
+  front_panel:
+    - { label: "+", type: "banana_jack", color: "red", description: "DC 出力プラス端子" }
+    - { label: "-", type: "banana_jack", color: "black", description: "DC 出力マイナス端子" }
+  rear_panel:
+    - { label: "USB", type: "USB-B", description: "USB Type-B コネクタ (PC 接続)" }
+    - { label: "LAN", type: "RJ-45", description: "LXI 準拠 LAN" }
+    - { label: "AC INPUT", type: "AC inlet", description: "AC 電源入力" }
+  notes:
+    - "リモートセンス端子 (+S/-S) はリアパネルに装備"
+    - "出力端子は前面のみ"
+
+# ===== Recipe: 典型ワークフロー (v0.3.0) =====
+recipes:
+
+  safe_output_on:
+    description: |
+      OVP/OCP を target_v / current_limit の 110% に自動設定してから安全に出力 ON する。
+      LLM は単にこの recipe を呼ぶだけで安全な起動シーケンスを保証できる。
+    parameters:
+      - { name: "target_v", type: "float", description: "目標出力電圧 (V)" }
+      - { name: "current_limit", type: "float", description: "最大電流 (A)" }
+    steps:
+      - { command: "reset", description: "機器初期化" }
+      - { command: "set_voltage_protection", args: { voltage: "$target_v * 1.1 + 0.5" }, description: "OVP を 110% + 0.5V に設定" }
+      - { command: "set_current_protection", args: { current: "$current_limit * 1.1 + 0.05" }, description: "OCP を 110% + 0.05A に設定" }
+      - { command: "set_voltage", args: { voltage: "$target_v" } }
+      - { command: "set_current", args: { current: "$current_limit" } }
+      - { command: "set_output", args: { state: "ON" } }
+
+  safe_shutdown:
+    description: "安全な停止シーケンス: 出力 OFF → 電圧 0 設定"
+    parameters: []
+    steps:
+      - { command: "set_output", args: { state: "OFF" } }
+      - { command: "set_voltage", args: { voltage: 0 } }
+
+  read_measurement:
+    description: "現在の出力電圧と電流を測定"
+    parameters: []
+    steps:
+      - { command: "measure_voltage" }
+      - { command: "measure_current" }
+
 commands:
 
   # ====================================================

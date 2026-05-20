@@ -520,6 +520,19 @@ commands:
     returns:
       type: "string"
       description: "測定データ文字列"
+      format: "measurement_data"   # v0.3.0: 応答を自動構造化
+
+  # トーカ機能の自動データ送出を読み取る (空 SCPI = read のみ)
+  read_measurement:
+    scpi: ""
+    type: "query"
+    description: |
+      GPIB トーカ機能で機器が自動送出する測定データを読み取る。
+      応答は response_formats.measurement_data で構造化される。
+    parameters: []
+    returns:
+      type: "string"
+      format: "measurement_data"
 
   # ====================================================
   # 6.3.34〜6.3.35 リモート／ローカル（RS-232-C 専用）
@@ -622,3 +635,69 @@ commands:
     returns:
       type: "integer"
       description: "状態バイト"
+
+# ===== 動作状態・推奨手順 (v0.3.0) =====
+operational_states:
+  startup_sequence:
+    - "initialize (C) でパネル設定を電源 ON 直後の状態に"
+    - "set_function でファンクション選択"
+    - "set_range でレンジ選択 (Auto は 0)"
+    - "TC モードなら set_temperature_unit と set_rjc_mode を設定"
+    - "trigger (E) で測定開始"
+  modes:
+    - name: "Local"
+      description: "フロントパネル操作可能"
+    - name: "Remote"
+      description: "リモート制御中 (ESC R / GPIB REN)"
+    - name: "Trigger waiting"
+      description: "サンプリングモードが SINGLE/N RDGS でトリガ待機中"
+    - name: "Calibration"
+      description: "リアパネル CAL スイッチが有効な校正モード（通常使用時は触らない）"
+  notes:
+    - "GPIB トーカ機能により、リード操作で常に直近の測定データが返る"
+    - "ターミネータは set_terminator で切替可 (CR/LF/EOI / LF / EOI/CR)"
+    - "ヘッダは set_header で ON にすると応答に付加される"
+
+# ===== 物理インタフェース (v0.3.0) =====
+physical_interface:
+  front_panel:
+    - { label: "INPUT HI", type: "banana_jack", color: "red", description: "正側入力" }
+    - { label: "INPUT LO", type: "banana_jack", color: "black", description: "負側入力" }
+    - { label: "SENSE HI", type: "banana_jack", color: "red", description: "4線式測定用センスライン正" }
+    - { label: "SENSE LO", type: "banana_jack", color: "black", description: "4線式測定用センスライン負" }
+    - { label: "GUARD", type: "banana_jack", color: "green", description: "ガード端子" }
+    - { label: "TC", type: "thermocouple_jack", description: "熱電対入力 (前面)" }
+  rear_panel:
+    - { label: "GPIB", type: "GPIB-24pin", description: "IEEE-488 コネクタ" }
+    - { label: "RS-232C", type: "DB-25", description: "RS-232C シリアル" }
+    - { label: "AC INPUT", type: "AC inlet", description: "AC 電源入力" }
+  notes:
+    - "DCV モード時の最大入力は 200V（DCV 200V レンジ）"
+    - "GUARD と LO の取り扱いは精密測定時に重要"
+
+# ===== Recipe: 典型ワークフロー (v0.3.0) =====
+recipes:
+
+  setup_k_thermocouple:
+    description: |
+      K 型熱電対による温度測定の標準セットアップ。
+      ファンクション=TC、レンジ=K型、単位=℃、基準接点補償=内部。
+    parameters:
+      - { name: "range", type: "integer", description: "K型熱電対のレンジコード (環境に依存)", default: 2 }
+    steps:
+      - { command: "set_function_and_range", args: { function: "12", range: "$range" }, description: "F12 (TC) + Rn" }
+      - { command: "set_temperature_unit", args: { unit: "0" }, description: "TU0 = ℃" }
+      - { command: "set_rjc_mode", args: { mode: "0" }, description: "RM0 = 内部基準接点補償" }
+
+  setup_dcv_200mv:
+    description: "DC 電圧 200mV レンジに設定"
+    parameters: []
+    steps:
+      - { command: "set_function_and_range", args: { function: "1", range: 3 } }
+
+  trigger_and_read:
+    description: "1 回トリガを発行して測定データを読み出す (構造化応答)"
+    parameters: []
+    steps:
+      - { command: "trigger", description: "A-D 変換起動" }
+      - { command: "read_measurement", description: "測定値読み出し → 構造化パース" }

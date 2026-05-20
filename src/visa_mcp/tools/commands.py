@@ -1,4 +1,8 @@
 from __future__ import annotations
+import logging
+import os
+import re
+
 from fastmcp import FastMCP
 from visa_mcp.session_manager import SessionManager
 from visa_mcp.visa_manager import VisaError
@@ -6,62 +10,184 @@ from visa_mcp.utils.param_validator import validate_and_build_scpi, ParameterVal
 from visa_mcp import safety as sf
 from visa_mcp.response_parser import parse_with_definition
 
+logger = logging.getLogger(__name__)
+
+# v0.4.0: raw SCPI を許可するか (環境変数オプトイン、デフォルト無効)
+RAW_COMMANDS_ENABLED = os.environ.get("VISA_MCP_ENABLE_RAW_COMMANDS", "0").strip() == "1"
+
+# 危険キーワード（write 系: 機器状態を変更する可能性が高い）
+_DANGEROUS_KEYWORDS = [
+    "*RST", "*CLS", "*SAV",
+    "VOLT", "CURR", "OUTP", "SOUR", "CONF",
+    "FUNC", "RANG", "INIT", "TRIG",
+    "MEM", "STOR", "RECALL",
+]
+
+
+def _detect_dangerous_keywords(command: str) -> list[str]:
+    """SCPI 文字列に危険キーワードが含まれるか検出。? を含む query 形式は除外する。
+    *RST のような IEEE 488.2 共通コマンドも対象に含めるため、
+    word boundary ではなく前後の文字を直接判定する。
+    """
+    cmd_upper = command.upper().strip()
+    if "?" in cmd_upper:
+        return []  # query 形式は基本的に状態を変更しない
+    hits = []
+    for kw in _DANGEROUS_KEYWORDS:
+        kw_u = kw.upper()
+        # コマンド中に kw_u が出現し、前は非英数字 (もしくは行頭)、後は非英数字 (もしくは行末)
+        for m in re.finditer(re.escape(kw_u), cmd_upper):
+            before_ok = m.start() == 0 or not cmd_upper[m.start() - 1].isalnum()
+            after_idx = m.end()
+            after_ok = after_idx == len(cmd_upper) or not cmd_upper[after_idx].isalnum()
+            if before_ok and after_ok:
+                hits.append(kw)
+                break
+    return hits
+
 
 def register_tools(mcp: FastMCP, session_mgr: SessionManager) -> None:
 
-    @mcp.tool()
-    async def query_instrument(
-        resource_name: str,
-        command: str,
-        timeout_ms: int = 5000,
-    ) -> dict:
-        """
-        任意の SCPI クエリコマンドを送信し応答を返す（汎用パススルー）。
-        resource_name: VISA リソース文字列（例: "GPIB0::1::INSTR"）
-        command: SCPI コマンド文字列（例: "*IDN?", "MEASure:VOLTage?"）
-        timeout_ms: タイムアウト（ミリ秒）
-        """
-        session = session_mgr.get_session(resource_name)
-        conn = session.definition.connection if (session and session.definition) else None
+    mode = sf.get_safety_mode()
 
-        try:
-            response = await session_mgr._visa.query(
-                resource_name,
-                command,
-                timeout_ms=timeout_ms,
-                read_termination=conn.read_termination if conn else "\n",
-                write_termination=conn.write_termination if conn else "\n",
-            )
-            return {"success": True, "data": {"response": response, "command": command}}
-        except VisaError as e:
-            return {"success": False, "error": type(e).__name__, "message": str(e), "resource_name": resource_name}
+    # ===== Raw (任意 SCPI) ツールは strict モードでは登録しない =====
+    if RAW_COMMANDS_ENABLED and mode != "strict":
+        logger.warning(
+            "VISA_MCP_ENABLE_RAW_COMMANDS=1 のため unsafe_send_command / unsafe_query_instrument "
+            "を登録します。これらは YAML 安全制約を介しません。利用には十分注意してください。"
+        )
 
-    @mcp.tool()
-    async def send_command(
-        resource_name: str,
-        command: str,
-        timeout_ms: int = 5000,
-    ) -> dict:
-        """
-        応答を必要としない SCPI コマンドを送信する（汎用パススルー）。
-        resource_name: VISA リソース文字列
-        command: SCPI コマンド文字列（例: "*RST", "AUTOSet EXECute"）
-        timeout_ms: タイムアウト（ミリ秒）
-        """
-        session = session_mgr.get_session(resource_name)
-        conn = session.definition.connection if (session and session.definition) else None
+        @mcp.tool()
+        async def unsafe_query_instrument(
+            resource_name: str,
+            command: str,
+            timeout_ms: int = 5000,
+            override_safety: bool = False,
+            override_reason: str = "",
+        ) -> dict:
+            """
+            [DANGEROUS] 任意の SCPI クエリを送信し応答を返す。
+            YAML 定義の検証・安全制約・パラメータ範囲チェックを介さない。
+            VISA_MCP_ENABLE_RAW_COMMANDS=1 のときのみ利用可能。
 
-        try:
-            await session_mgr._visa.write(
-                resource_name,
-                command,
-                timeout_ms=timeout_ms,
-                read_termination=conn.read_termination if conn else "\n",
-                write_termination=conn.write_termination if conn else "\n",
-            )
-            return {"success": True, "data": {"command": command, "resource_name": resource_name}}
-        except VisaError as e:
-            return {"success": False, "error": type(e).__name__, "message": str(e), "resource_name": resource_name}
+            危険キーワード (VOLT/CURR/OUTP/*RST 等) を含むコマンドは override_safety=True
+            と override_reason の指定が必要。
+
+            resource_name: VISA リソース文字列
+            command: 任意の SCPI 文字列
+            timeout_ms: タイムアウト (ms)
+            override_safety: 危険キーワードを含む場合の override (advisory モードのみ有効)
+            override_reason: override 理由 (override_safety=True 時に必須)
+            """
+            session = session_mgr.get_session(resource_name)
+            conn = session.definition.connection if (session and session.definition) else None
+            hits = _detect_dangerous_keywords(command)
+
+            # 危険キーワードがある場合は safety と同じ判定ロジック
+            if hits:
+                violations = [sf.SafetyViolation(
+                    "raw_dangerous_keyword",
+                    f"raw コマンド '{command}' に危険キーワード {hits} を検出",
+                    severity="high",
+                    recommendation="execute_named_command を使うか、override_safety=True + override_reason で再実行",
+                )]
+                action, msg = sf.decide_action(violations, mode, override_safety, override_reason or None)
+                sf.write_audit(
+                    resource_name, "unsafe_query_instrument",
+                    {"command": command}, violations,
+                    action=action, mode=mode,
+                    override_safety=override_safety, override_reason=override_reason or None,
+                )
+                if action in ("block_advisory", "block_strict"):
+                    resp = sf.make_warning_response(violations, action, mode)
+                    resp["message"] = msg
+                    return resp
+
+            # 監査ログ (危険キーワードなしでも記録)
+            if not hits:
+                sf.write_audit(
+                    resource_name, "unsafe_query_instrument",
+                    {"command": command}, [],
+                    action="proceed", mode=mode,
+                    override_safety=False, override_reason=None,
+                )
+
+            try:
+                response = await session_mgr._visa.query(
+                    resource_name, command, timeout_ms=timeout_ms,
+                    read_termination=conn.read_termination if conn else "\n",
+                    write_termination=conn.write_termination if conn else "\n",
+                )
+                return {
+                    "success": True,
+                    "data": {"response": response, "command": command},
+                    "dangerous_keywords_detected": hits,
+                }
+            except VisaError as e:
+                return {"success": False, "error": type(e).__name__, "message": str(e), "resource_name": resource_name}
+
+        @mcp.tool()
+        async def unsafe_send_command(
+            resource_name: str,
+            command: str,
+            timeout_ms: int = 5000,
+            override_safety: bool = False,
+            override_reason: str = "",
+        ) -> dict:
+            """
+            [DANGEROUS] 応答を読まない任意の SCPI コマンドを送信する (write)。
+            YAML 定義の検証・安全制約を介さない。
+            VISA_MCP_ENABLE_RAW_COMMANDS=1 のときのみ利用可能。
+
+            危険キーワード (VOLT/CURR/OUTP/*RST 等) を含むコマンドは override_safety=True
+            と override_reason の指定が必要。
+            """
+            session = session_mgr.get_session(resource_name)
+            conn = session.definition.connection if (session and session.definition) else None
+            hits = _detect_dangerous_keywords(command)
+
+            if hits:
+                violations = [sf.SafetyViolation(
+                    "raw_dangerous_keyword",
+                    f"raw コマンド '{command}' に危険キーワード {hits} を検出",
+                    severity="high",
+                    recommendation="execute_named_command を使うか、override_safety=True + override_reason で再実行",
+                )]
+                action, msg = sf.decide_action(violations, mode, override_safety, override_reason or None)
+                sf.write_audit(
+                    resource_name, "unsafe_send_command",
+                    {"command": command}, violations,
+                    action=action, mode=mode,
+                    override_safety=override_safety, override_reason=override_reason or None,
+                )
+                if action in ("block_advisory", "block_strict"):
+                    resp = sf.make_warning_response(violations, action, mode)
+                    resp["message"] = msg
+                    return resp
+
+            if not hits:
+                sf.write_audit(
+                    resource_name, "unsafe_send_command",
+                    {"command": command}, [],
+                    action="proceed", mode=mode,
+                    override_safety=False, override_reason=None,
+                )
+
+            try:
+                await session_mgr._visa.write(
+                    resource_name, command, timeout_ms=timeout_ms,
+                    read_termination=conn.read_termination if conn else "\n",
+                    write_termination=conn.write_termination if conn else "\n",
+                )
+                return {
+                    "success": True,
+                    "data": {"command": command, "resource_name": resource_name},
+                    "dangerous_keywords_detected": hits,
+                }
+            except VisaError as e:
+                return {"success": False, "error": type(e).__name__, "message": str(e), "resource_name": resource_name}
+
+    # ===== execute_named_command (YAML 定義経由、常に登録) =====
 
     @mcp.tool()
     async def execute_named_command(
@@ -93,7 +219,7 @@ def register_tools(mcp: FastMCP, session_mgr: SessionManager) -> None:
             return {
                 "success": False,
                 "error": "NoDefinitionFound",
-                "message": f"{resource_name} の YAML 定義が見つかりません。query_instrument で直接コマンドを送信してください。",
+                "message": f"{resource_name} の YAML 定義が見つかりません。",
             }
 
         cmd_def = session.definition.commands.get(command_name)
@@ -106,31 +232,30 @@ def register_tools(mcp: FastMCP, session_mgr: SessionManager) -> None:
             }
 
         # 安全制約チェック (v0.2.0)
-        mode = sf.get_safety_mode()
+        current_mode = sf.get_safety_mode()
         violations = sf.validate(
             session.definition,
             command_name,
             parameters,
             session_history=session.command_history,
         )
-        action, msg = sf.decide_action(violations, mode, override_safety, override_reason or None)
+        action, msg = sf.decide_action(violations, current_mode, override_safety, override_reason or None)
 
         if action in ("block_advisory", "block_strict"):
             sf.write_audit(
                 resource_name, command_name, parameters, violations,
-                action=action, mode=mode,
+                action=action, mode=current_mode,
                 override_safety=override_safety, override_reason=override_reason or None,
             )
-            resp = sf.make_warning_response(violations, action, mode)
+            resp = sf.make_warning_response(violations, action, current_mode)
             resp["message"] = msg
             return resp
 
-        # advisory モードで override 経由 or permissive モードでの違反は監査ログに記録
         if violations:
             sf.write_audit(
                 resource_name, command_name, parameters, violations,
                 action="proceed_with_override" if override_safety else "proceed_permissive",
-                mode=mode,
+                mode=current_mode,
                 override_safety=override_safety, override_reason=override_reason or None,
             )
 
@@ -158,7 +283,6 @@ def register_tools(mcp: FastMCP, session_mgr: SessionManager) -> None:
                     "value": result,
                     "unit": cmd_def.returns.unit,
                 }
-                # v0.3.0: 応答フォーマット指定があれば構造化パースを追加
                 if cmd_def.returns.format:
                     parsed = parse_with_definition(raw, session.definition, cmd_def.returns.format)
                     data["parsed"] = parsed

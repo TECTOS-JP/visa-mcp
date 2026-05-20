@@ -25,15 +25,33 @@ logger = logging.getLogger(__name__)
 SafetyMode = Literal["strict", "advisory", "permissive"]
 
 
+_MODE_WARNING_EMITTED = False
+
+
 def get_safety_mode() -> SafetyMode:
-    """環境変数 VISA_MCP_SAFETY_MODE からモードを取得 (デフォルト: advisory)"""
-    raw = os.environ.get("VISA_MCP_SAFETY_MODE", "advisory").strip().lower()
+    """
+    環境変数 VISA_MCP_SAFETY_MODE からモードを取得 (デフォルト: strict, v0.4.0 から)。
+
+    v0.3.0 までは advisory がデフォルトだったが、LLM が操作主体になる
+    MCP では保守的な初期値が望ましいため、v0.4.0 から strict に変更した。
+    """
+    global _MODE_WARNING_EMITTED
+    raw_env = os.environ.get("VISA_MCP_SAFETY_MODE")
+    if raw_env is None:
+        if not _MODE_WARNING_EMITTED:
+            logger.warning(
+                "VISA_MCP_SAFETY_MODE が未設定です。デフォルトの 'strict' を使用します。"
+                " 研究開発で override を使いたい場合は VISA_MCP_SAFETY_MODE=advisory を指定してください。"
+            )
+            _MODE_WARNING_EMITTED = True
+        return "strict"
+    raw = raw_env.strip().lower()
     if raw in ("strict", "advisory", "permissive"):
         return raw  # type: ignore[return-value]
     logger.warning(
-        "不明な VISA_MCP_SAFETY_MODE='%s'。advisory にフォールバックします。", raw
+        "不明な VISA_MCP_SAFETY_MODE='%s'。strict にフォールバックします。", raw
     )
-    return "advisory"
+    return "strict"
 
 
 def get_audit_log_path() -> Path:

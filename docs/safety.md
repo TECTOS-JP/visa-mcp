@@ -15,9 +15,27 @@ visa-mcp v0.2.0 から、YAML 定義に **`safety` セクション**を記述す
 
 | モード | 違反時の動作 | Override | 用途 |
 |-------|-----------|---------|------|
-| `strict` | エラー返却、実行ブロック | **不可** | 教育現場・無人運転 |
-| **`advisory`**（**デフォルト**） | 警告返却、要 override | 可（理由必須） | 通常の研究開発 |
-| `permissive` | ログ記録のみ、警告も返さない | 不要 | 習熟者の手動操作 |
+| **`strict`**（**v0.4.0 からのデフォルト**） | エラー返却、実行ブロック | **不可** | LLM 主体運用・教育・無人運転 |
+| `advisory` | 警告返却、要 override | 可（理由必須） | 研究開発（人間が同席） |
+| `permissive` | ログ記録のみ、警告も返さない | 不要 | 習熟者の手動操作（非推奨）|
+
+> **v0.3.0 → v0.4.0 の変更点**: デフォルトモードを `advisory` から `strict` に変更しました。
+> override を使いたい場合は明示的に `VISA_MCP_SAFETY_MODE=advisory` を指定してください。
+> 環境変数未設定時には警告ログが出ます。
+
+## Raw SCPI コマンド (`unsafe_send_command` / `unsafe_query_instrument`)
+
+`execute_named_command` は YAML 定義経由の検証を通りますが、任意 SCPI 文字列を送る生コマンド機能は **デフォルトで無効化**されています。
+
+| 設定 | 動作 |
+|------|------|
+| 既定 | raw コマンドツールは登録されない |
+| `VISA_MCP_ENABLE_RAW_COMMANDS=1` | `unsafe_send_command` / `unsafe_query_instrument` が登録される |
+| `strict` モード | 環境変数の有無にかかわらず raw ツールは登録されない |
+
+raw ツール内では SCPI 文字列を簡易解析し、`VOLT` `CURR` `OUTP` `*RST` 等の **危険キーワード** が含まれる場合は警告を返します。`override_safety=True` + `override_reason` の指定で実行できます（advisory モード時のみ）。
+
+すべての raw コマンドは監査ログに記録されます。
 
 ```bash
 # Windows

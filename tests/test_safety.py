@@ -141,7 +141,13 @@ def test_decide_permissive_always_proceeds():
 # === モード取得 ===
 
 def test_get_safety_mode_default(monkeypatch):
+    """v0.4.0 から既定モードは strict"""
     monkeypatch.delenv("VISA_MCP_SAFETY_MODE", raising=False)
+    assert sf.get_safety_mode() == "strict"
+
+
+def test_get_safety_mode_advisory_explicit(monkeypatch):
+    monkeypatch.setenv("VISA_MCP_SAFETY_MODE", "advisory")
     assert sf.get_safety_mode() == "advisory"
 
 
@@ -151,8 +157,9 @@ def test_get_safety_mode_from_env(monkeypatch):
 
 
 def test_get_safety_mode_invalid_falls_back(monkeypatch):
+    """v0.4.0 から不明値は strict にフォールバック"""
     monkeypatch.setenv("VISA_MCP_SAFETY_MODE", "invalid")
-    assert sf.get_safety_mode() == "advisory"
+    assert sf.get_safety_mode() == "strict"
 
 
 # === 監査ログ ===

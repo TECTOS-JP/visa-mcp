@@ -37,6 +37,18 @@ class VisaManager:
                 "pyvisa がインストールされていません。`pip install pyvisa` を実行してください。"
             )
         self._rm: pyvisa.ResourceManager | None = None
+        # v0.4.0: リソース単位の排他ロック (同一機器への同時アクセスを直列化)
+        self._locks: dict[str, asyncio.Lock] = {}
+
+    def _get_lock(self, resource_name: str) -> asyncio.Lock:
+        """resource_name ごとの asyncio.Lock を返す (なければ生成)。
+        異なる機器への並列アクセスは妨げず、同一機器のみ逐次保証する。
+        """
+        lock = self._locks.get(resource_name)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._locks[resource_name] = lock
+        return lock
 
     def _get_rm(self) -> "pyvisa.ResourceManager":
         if self._rm is None:
@@ -91,7 +103,8 @@ class VisaManager:
             except Exception as e:
                 raise VisaError(f"クエリ中にエラーが発生しました: {e}") from e
 
-        return await self._run(_query)
+        async with self._get_lock(resource_name):
+            return await self._run(_query)
 
     async def write(
         self,
@@ -123,7 +136,8 @@ class VisaManager:
             except Exception as e:
                 raise VisaError(f"コマンド送信中にエラーが発生しました: {e}") from e
 
-        await self._run(_write)
+        async with self._get_lock(resource_name):
+            await self._run(_write)
 
     def close(self) -> None:
         if self._rm is not None:

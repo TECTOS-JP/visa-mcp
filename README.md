@@ -69,7 +69,7 @@ Claude に話しかける：
 >
 > 「USB0::0x... を identify_instrument で識別して、5V 出力するように設定してください」
 
-## 提供される MCP ツール（12 個）
+## 提供される MCP ツール（17 個 / raw 系は別途オプトイン）
 
 | ツール | 用途 |
 |-------|------|
@@ -81,10 +81,15 @@ Claude に話しかける：
 | `list_available_definitions` | ロード済みの YAML 定義一覧 |
 | `list_commands` | 識別済み機器の利用可能コマンド表示 |
 | `execute_named_command` | 型安全に名前付きコマンドを実行 |
-| `query_instrument` | 任意の SCPI クエリを送信 |
-| `send_command` | 任意の SCPI コマンドを送信（write） |
+| `get_instrument_info` | 機器仕様・安全制約・recipes 等を一括取得 |
+| `list_safety_constraints` | 安全制約のみを抽出 |
+| `validate_operation` | 実行せずに事前検証 (dry-run) |
+| `list_recipes` | 利用可能な典型ワークフロー一覧 |
+| `execute_recipe` | 複数コマンドの安全な順次実行 |
 | `reload_definitions` | 定義ファイルを再読込 |
 | `extract_pdf_commands` | PDF マニュアルからコマンド候補を抽出 |
+
+加えて、環境変数 `VISA_MCP_ENABLE_RAW_COMMANDS=1` で **未検証の任意 SCPI** を送る危険ツールを 2 個追加可能（`unsafe_send_command` / `unsafe_query_instrument`、strict モードでは登録されない）。詳細は [docs/safety.md](docs/safety.md)。
 
 詳細は [docs/mcp_tools_reference.md](docs/mcp_tools_reference.md) を参照。
 

@@ -21,6 +21,124 @@ from visa_mcp.response_envelope import make_envelope, make_error
 logger = logging.getLogger(__name__)
 
 
+def _recommended_actions_for(rec) -> list[dict]:
+    """
+    Job 終端状態に応じて LLM 向けの次手候補を返す。
+
+    各 action は下記キー:
+      action       : 名称 (retry / inspect_state / safe_shutdown / resume_from_step / give_up)
+      tool         : 関連 MCP ツール (任意)
+      args         : 推奨引数 (任意)
+      reason       : 理由 (人間向け、簡潔)
+    """
+    actions: list[dict] = []
+
+    if rec.status == JobStatus.TIMEOUT:
+        actions.append({
+            "action": "retry",
+            "tool": "start_recipe_job",
+            "args": {
+                "resource_name": rec.resource_name,
+                "recipe_name": rec.recipe,
+                "parameters": rec.parameters,
+                "job_timeout_s": "<より大きな値>",
+            },
+            "reason": "より長い job_timeout_s で再実行する",
+        })
+        actions.append({
+            "action": "inspect_state",
+            "tool": "get_job_result",
+            "args": {"job_id": rec.job_id},
+            "reason": "どこで時間切れになったか steps_executed で確認",
+        })
+        actions.append({
+            "action": "safe_shutdown",
+            "reason": "機器が中途半端な状態の可能性。次の操作前に出力 OFF を確認",
+        })
+
+    elif rec.status == JobStatus.INTERRUPTED:
+        actions.append({
+            "action": "inspect_state",
+            "tool": "get_job_result",
+            "args": {"job_id": rec.job_id},
+            "reason": "サーバ再起動前の last_completed_step を確認",
+        })
+        actions.append({
+            "action": "safe_shutdown",
+            "reason": "機器の現在状態が不明。安全停止コマンドで初期化を推奨",
+        })
+        actions.append({
+            "action": "resume_from_step",
+            "reason": "v0.9.0+ で実装予定。現在は手動再実行のみ",
+        })
+
+    elif rec.status == JobStatus.FAILED:
+        err = rec.error_class or "internal"
+        if err == "safety":
+            actions.append({
+                "action": "review_safety_constraints",
+                "tool": "list_safety_constraints",
+                "args": {"resource_name": rec.resource_name},
+                "reason": "違反した安全制約の内容を確認",
+            })
+            actions.append({
+                "action": "retry_with_override",
+                "tool": "start_recipe_job",
+                "args": {
+                    "resource_name": rec.resource_name,
+                    "recipe_name": rec.recipe,
+                    "parameters": rec.parameters,
+                    "override_safety": True,
+                    "override_reason": "<ユーザー確認済みの理由>",
+                },
+                "reason": "advisory モードかつ明示的な理由がある場合に限り override 可",
+            })
+        elif err == "validation":
+            actions.append({
+                "action": "fix_parameters",
+                "reason": "パラメータの値・型・範囲を見直して再実行",
+            })
+        elif err == "not_found":
+            actions.append({
+                "action": "list_recipes",
+                "tool": "list_recipes",
+                "args": {"resource_name": rec.resource_name},
+                "reason": "利用可能な recipe を確認",
+            })
+            actions.append({
+                "action": "list_resources",
+                "tool": "list_resources",
+                "reason": "接続中のリソース名を再確認",
+            })
+        else:  # timeout / hardware / protocol / internal
+            actions.append({
+                "action": "retry",
+                "tool": "start_recipe_job",
+                "args": {
+                    "resource_name": rec.resource_name,
+                    "recipe_name": rec.recipe,
+                    "parameters": rec.parameters,
+                },
+                "reason": "一時的なエラーの可能性。同じ条件で再試行",
+            })
+            actions.append({
+                "action": "inspect_state",
+                "tool": "get_job_result",
+                "args": {"job_id": rec.job_id},
+                "reason": "失敗した step の詳細を確認",
+            })
+
+    elif rec.status == JobStatus.CANCELLED:
+        actions.append({
+            "action": "inspect_state",
+            "tool": "get_job_result",
+            "args": {"job_id": rec.job_id},
+            "reason": "どこまで実行されたか確認",
+        })
+
+    return actions
+
+
 def register_tools(mcp: FastMCP, job_mgr: JobManager) -> None:
 
     @mcp.tool()
@@ -31,6 +149,7 @@ def register_tools(mcp: FastMCP, job_mgr: JobManager) -> None:
         owner: str = "",
         override_safety: bool = False,
         override_reason: str = "",
+        job_timeout_s: float = 0.0,
     ) -> dict:
         """
         Recipe をバックグラウンド Job として登録し、即座に job_id を返す。
@@ -42,6 +161,8 @@ def register_tools(mcp: FastMCP, job_mgr: JobManager) -> None:
         owner: 所有者識別子 (将来のマルチエージェント用、任意)
         override_safety: 安全制約警告を override (advisory モード時のみ有効)
         override_reason: override 理由 (override_safety=True 時必須)
+        job_timeout_s: Job 全体の制限秒数。0 または未指定なら 24 時間。
+                       経過すると Job は自動で TIMEOUT 状態に遷移する。
         """
         try:
             rec = await job_mgr.start_recipe_job(
@@ -49,6 +170,7 @@ def register_tools(mcp: FastMCP, job_mgr: JobManager) -> None:
                 owner=owner,
                 override_safety=override_safety,
                 override_reason=override_reason,
+                job_timeout_s=(job_timeout_s if job_timeout_s > 0 else None),
             )
         except Exception as e:
             logger.exception("start_recipe_job 失敗")
@@ -142,6 +264,14 @@ def register_tools(mcp: FastMCP, job_mgr: JobManager) -> None:
             JobStatus.INTERRUPTED: "error",
         }
         envelope_status = status_map.get(rec.status, "error")
+        errors_field = None
+        if envelope_status == "error":
+            errors_field = [make_error(
+                rec.error_class or "internal",
+                rec.last_step_summary or rec.status.value,
+                recoverable=(rec.status not in (JobStatus.FAILED,)),
+                recommended_next_actions=_recommended_actions_for(rec),
+            )]
         return make_envelope(
             envelope_status,
             data={
@@ -153,11 +283,7 @@ def register_tools(mcp: FastMCP, job_mgr: JobManager) -> None:
                 "created_at": rec.created_at,
                 "updated_at": rec.updated_at,
             },
-            errors=([make_error(
-                rec.error_class or "internal",
-                rec.last_step_summary or rec.status.value,
-                recoverable=(rec.status != JobStatus.FAILED),
-            )] if envelope_status == "error" else None),
+            errors=errors_field,
             job_id=rec.job_id,
         )
 

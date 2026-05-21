@@ -1,5 +1,5 @@
 """
-Job Manager + Executor (v0.5.0-rc2)
+Job Manager + Executor (v0.5.0)
 
 - JobManager: recipe を非同期 Job として登録・追跡・キャンセル
 - バックグラウンドは asyncio.create_task で実行
@@ -7,10 +7,12 @@ Job Manager + Executor (v0.5.0-rc2)
 - cancel_mode は immediate / after_current_step / safe_shutdown の 3 種類
 - recipe Step 単位で cancel チェック (各 step 開始前に確認)
 - WaitStep 実行中は短いインターバルで cancel チェックして即時停止可能
+- job_timeout_s で TIMEOUT 自動遷移 (v0.5.0 追加)
 """
 from __future__ import annotations
 import asyncio
 import logging
+import time
 import uuid
 from typing import Any
 
@@ -32,8 +34,11 @@ from visa_mcp.visa_manager import VisaManager
 logger = logging.getLogger(__name__)
 
 
-# wait step を細かいスライスに分割して cancel に即応するためのインターバル
+# wait step を細かいスライスに分割して cancel/timeout に即応するためのインターバル
 _WAIT_SLICE_S = 0.2
+
+# job_timeout_s デフォルト (24時間)
+DEFAULT_JOB_TIMEOUT_S: float = 86400.0
 
 
 class JobNotFoundError(Exception):
@@ -45,11 +50,20 @@ class JobAlreadyTerminalError(Exception):
 
 
 class _JobRuntime:
-    """asyncio.Task と cancel 要求フラグの組"""
+    """asyncio.Task と cancel 要求フラグ / 期限の組"""
 
-    def __init__(self, task: asyncio.Task) -> None:
+    def __init__(self, task: asyncio.Task, deadline: float | None) -> None:
         self.task = task
         self.cancel_mode: CancelMode | None = None  # 設定されたら cancel 要求中
+        self.deadline = deadline                     # time.monotonic() 基準。None なら無期限
+
+    def is_timed_out(self) -> bool:
+        return self.deadline is not None and time.monotonic() >= self.deadline
+
+    def remaining_s(self) -> float | None:
+        if self.deadline is None:
+            return None
+        return max(0.0, self.deadline - time.monotonic())
 
 
 class JobManager:
@@ -90,11 +104,15 @@ class JobManager:
         owner: str = "",
         override_safety: bool = False,
         override_reason: str = "",
+        job_timeout_s: float | None = None,
     ) -> JobRecord:
         """
         recipe を Job として登録し、即座に bg 実行を開始。返り値は登録直後の JobRecord (queued)。
 
         起動失敗 (定義なし / 必須パラメータ欠落) は SQLite 上で failed として記録した上で返す。
+
+        job_timeout_s: 全体の実行制限秒数 (None なら DEFAULT_JOB_TIMEOUT_S = 24h)。
+                       経過すると Job は自動で TIMEOUT 状態に遷移する。
         """
         parameters = parameters or {}
         session = self._sessions.get_session(resource_name)
@@ -130,6 +148,12 @@ class JobManager:
             parameters=parameters,
         )
 
+        # タイムアウト計算
+        effective_timeout = (
+            DEFAULT_JOB_TIMEOUT_S if job_timeout_s is None else float(job_timeout_s)
+        )
+        deadline = time.monotonic() + effective_timeout if effective_timeout > 0 else None
+
         # バックグラウンド実行開始
         task = asyncio.create_task(
             self._run_job(
@@ -139,7 +163,7 @@ class JobManager:
             ),
             name=f"job-{job_id}",
         )
-        self._runtimes[job_id] = _JobRuntime(task)
+        self._runtimes[job_id] = _JobRuntime(task, deadline)
         return rec
 
     def get(self, job_id: str) -> JobRecord:
@@ -294,6 +318,10 @@ class JobManager:
 
         try:
             for idx, step in enumerate(plan.steps):
+                # timeout チェック
+                if runtime.is_timed_out():
+                    self._record_timeout(rec, idx, step_results)
+                    return
                 # cancel チェック
                 if runtime.cancel_mode is not None:
                     last_terminal = await self._handle_cancel(
@@ -306,7 +334,7 @@ class JobManager:
                     last_step_summary=self._step_summary(step),
                 )
 
-                # WaitStep は専用パス (cancel に即応)
+                # WaitStep は専用パス (cancel/timeout に即応)
                 if isinstance(step, WaitStep):
                     # waiting 状態へ
                     self._safe_transition(job_id, JobStatus.WAITING)
@@ -328,6 +356,10 @@ class JobManager:
                 step_results.append({"step": idx, **result})
 
                 if not result.get("success", False):
+                    # wait の timeout 中断 → TIMEOUT 終端へ
+                    if result.get("interrupted_by_timeout"):
+                        self._record_timeout(rec, idx, step_results)
+                        return
                     # cancel 要求による wait 中断は failed ではなく cancel 経路へ
                     if result.get("interrupted_by_cancel"):
                         last_terminal = await self._handle_cancel(
@@ -402,9 +434,19 @@ class JobManager:
         step: WaitStep,
         runtime: _JobRuntime,
     ) -> dict:
-        """wait を _WAIT_SLICE_S 刻みで sleep し、間に cancel チェックを挟む。"""
+        """wait を _WAIT_SLICE_S 刻みで sleep し、間に cancel/timeout チェックを挟む。"""
         remaining = float(step.seconds)
         while remaining > 0:
+            # timeout チェック
+            if runtime.is_timed_out():
+                return {
+                    "step_type": "wait",
+                    "seconds": float(step.seconds) - remaining,
+                    "interrupted_by_timeout": True,
+                    "success": False,
+                    "error": "timeout",
+                    "message": "wait interrupted by job_timeout_s",
+                }
             if runtime.cancel_mode is CancelMode.IMMEDIATE:
                 # asyncio.Task.cancel() で別途処理されるが、念のため
                 raise asyncio.CancelledError("immediate cancel during wait")
@@ -465,6 +507,25 @@ class JobManager:
             },
         )
         return JobStatus.CANCELLED
+
+    def _record_timeout(
+        self,
+        rec: JobRecord,
+        step_idx: int,
+        step_results: list[dict],
+    ) -> None:
+        """job_timeout_s 経過時の TIMEOUT 終端遷移を記録"""
+        self._store.transition_status(
+            rec.job_id, JobStatus.TIMEOUT,
+            current_step_index=step_idx,
+            error_class="timeout",
+            last_step_summary=f"job_timeout_s exceeded at step {step_idx}",
+            result={
+                "success": False, "recipe": rec.recipe,
+                "steps_executed": step_results,
+                "timed_out_at_step": step_idx,
+            },
+        )
 
     async def _best_effort_safe_shutdown(self, session) -> str:
         """汎用的な安全停止: set_output(OFF) と set_voltage(0) を試みる。"""

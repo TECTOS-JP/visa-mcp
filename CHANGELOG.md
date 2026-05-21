@@ -1,5 +1,115 @@
 # 変更履歴
 
+## v0.5.0 — Job MVP 正式版
+
+実験実行基盤の "Job MVP" を正式リリース。rc1/rc2 で導入した基盤に **timeout 自動遷移** と
+**recommended_next_actions** を加え、長時間 Recipe を AI エージェントに安全に委譲できる状態に到達。
+
+### v0.5.0 で追加 (rc2 → 正式)
+
+- **`job_timeout_s` パラメータ** ── `start_recipe_job` に追加。経過すると Job は自動で
+  `timeout` 状態に遷移。step 境界 + wait 200ms スライス毎にチェック
+- **`recommended_next_actions`** ── 終端状態 (failed / timeout / cancelled / interrupted) の
+  `get_job_result` レスポンスに、エラー種別に応じた次手候補を構造化付与
+  - timeout: retry (より大きな job_timeout_s で) / inspect_state / safe_shutdown
+  - safety failed: review_safety_constraints / retry_with_override
+  - validation failed: fix_parameters
+  - not_found failed: list_recipes / list_resources
+  - interrupted: inspect_state / safe_shutdown / resume_from_step (v0.9.0+ 予定)
+- **`docs/jobs.md`** 新規 ── Job モデル全体のリファレンス
+- **README 更新** ── 20 ツールを Identification / Execution / Job / Import に分類
+
+### v0.5.0 全体の累積機能
+
+#### MCP ツール (20 個 + opt-in 2 個 = 最大 22 個)
+
+| カテゴリ | ツール | 概要 |
+|---------|-------|------|
+| 識別・情報 (10) | `list_resources`, `identify_*`, `bind_definition`, `list_available_definitions`, `list_commands`, `get_instrument_info`, `list_safety_constraints`, `reload_definitions` | 機器の発見と情報 |
+| 同期実行 (4) | `execute_named_command`, `validate_operation`, `list_recipes`, `execute_recipe` | コマンド・recipe の即時実行 |
+| **Job (5) 新規** | `start_recipe_job`, `get_job_status`, `get_job_result`, `list_jobs`, `cancel_job` | バックグラウンド非同期実行 |
+| 取り込み (1) | `extract_pdf_commands` | PDF → YAML 草案 |
+| opt-in (2) | `unsafe_send_command`, `unsafe_query_instrument` | 任意 SCPI (危険) |
+
+#### Job 状態機械
+
+```
+queued → running → waiting → completed
+                 → failed       (safety / validation / hardware / protocol / internal)
+                 → cancelling → cancelled
+                 → timeout      (job_timeout_s 経過)
+                 → interrupted  (サーバ再起動)
+```
+
+#### CancelMode
+
+| モード | 動作 |
+|-------|------|
+| `immediate` | `asyncio.Task.cancel()` |
+| `after_current_step` | 現在 step 完了後 / wait 中断で停止 |
+| `safe_shutdown` | `set_output OFF` + `set_voltage 0` を試みてから停止 |
+
+#### 永続化
+
+- `~/.visa-mcp/state.sqlite` (環境変数 `VISA_MCP_STATE_DB` で変更可)
+- WAL モード、スレッドセーフ
+- 起動時に running/waiting/cancelling な Job を `interrupted` に自動遷移
+
+#### 内部 IR
+
+- `visa_mcp.experiment_ir.Step` (CommandStep / WaitStep の discriminated union)
+- `visa_mcp.experiment_ir.Plan`
+- Recipe / Job / (将来の Group / DSL) executor が共有
+- v0.8.0 のリポジトリ分割時に `experiment_mcp/ir/` へそのまま移動できる疎結合設計
+
+#### 標準レスポンス形式
+
+v0.5.0+ 新規ツール (15 個中 5 個の Job ツール) は `response_envelope` 形式で返す:
+
+```json
+{
+  "status": "ok" | "error" | "partial_failure" | "running",
+  "data": { ... },
+  "errors": [{
+    "error_class": "...",
+    "message": "...",
+    "recoverable": true,
+    "recommended_next_actions": [...]
+  }],
+  "metadata": { "timestamp": "...", "elapsed_s": ..., "job_id": "..." }
+}
+```
+
+### テスト
+
+- **212 件全パス** (v0.4.1 の 115 件から +97 件)
+  - `test_experiment_ir.py` (10): IR 型
+  - `test_response_envelope.py` (12): envelope / error 生成
+  - `test_recipe_wait_step.py` (11): RecipeStep + recipe_to_plan + 実行
+  - `test_job_state_machine.py` (25): 遷移ルール
+  - `test_job_store.py` (10): SQLite CRUD
+  - `test_job_manager.py` (9): start/wait/cancel/list
+  - `test_job_timeout.py` (4): job_timeout_s 経路
+  - `test_recommended_next_actions.py` (10): 次手候補生成
+
+### 実機検証 (Kikusui PMX35-3A)
+
+- 9-step recipe (wait 含む) を Job として `queued → waiting → completed` で完走
+- `cancel_job(safe_shutdown)` 後の `OUTP?` = 0 (安全停止後の出力 OFF を確認)
+- `job_timeout_s=1.5` で 10 秒 wait を含む job が **step 6 (wait) で TIMEOUT に自動遷移**
+
+### 後方互換
+
+- 既存 17 ツール + recipe / safety / response_format すべて変更なし
+- v0.4.1 までの YAML 定義はすべて変更なしで動作
+
+### 次のリリース (v0.5.1) で予定
+
+- 条件待機 step (`wait_until` / `wait_for_condition` / `wait_for_stable`)
+- `start_wait_job` MCP ツール
+
+---
+
 ## v0.5.0-rc2 — Job 基盤 (state machine + SQLite + 5 MCP ツール)
 
 実験実行基盤 "Job MVP" の中核。Recipe を非同期 Job として登録・追跡・キャンセルできる。

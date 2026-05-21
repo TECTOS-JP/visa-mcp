@@ -11,7 +11,10 @@ from visa_mcp.session_manager import SessionManager
 from visa_mcp.tools import discovery, commands, pdf_extractor, info, recipes
 from visa_mcp.tools import jobs as jobs_tools
 from visa_mcp.tools import waits as waits_tools
+from visa_mcp.tools import groups as groups_tools
 from visa_mcp.job import JobManager
+from visa_mcp.system_config import SystemConfig
+from visa_mcp.bus_manager import BusManager
 from visa_mcp import safety as sf
 
 logging.basicConfig(
@@ -65,7 +68,11 @@ mcp = FastMCP(
 visa_mgr = VisaManager()
 registry = InstrumentRegistry(INSTRUMENTS_DIR)
 session_mgr = SessionManager(visa_mgr, registry)
-job_mgr = JobManager(visa_mgr, session_mgr)
+# v0.6.0: SystemConfig (instruments/_system.yaml) を読み込み
+_system_config = SystemConfig.from_yaml(INSTRUMENTS_DIR / "_system.yaml")
+_bus_mgr = BusManager(_system_config)
+visa_mgr.set_bus_manager(_bus_mgr)
+job_mgr = JobManager(visa_mgr, session_mgr, system_config=_system_config)
 
 discovery.register_tools(mcp, session_mgr)
 commands.register_tools(mcp, session_mgr)
@@ -73,6 +80,7 @@ info.register_tools(mcp, session_mgr)
 recipes.register_tools(mcp, session_mgr)
 jobs_tools.register_tools(mcp, job_mgr)
 waits_tools.register_tools(mcp, job_mgr)
+groups_tools.register_tools(mcp, job_mgr)
 pdf_extractor.register_tools(mcp)
 
 

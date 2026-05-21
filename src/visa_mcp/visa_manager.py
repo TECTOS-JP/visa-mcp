@@ -31,7 +31,7 @@ class VisaManager:
     NI-VISA バックエンドのみ使用（フォールバックなし）。
     """
 
-    def __init__(self) -> None:
+    def __init__(self, bus_manager=None) -> None:
         if not _PYVISA_AVAILABLE:
             raise VisaError(
                 "pyvisa がインストールされていません。`pip install pyvisa` を実行してください。"
@@ -39,6 +39,13 @@ class VisaManager:
         self._rm: pyvisa.ResourceManager | None = None
         # v0.4.0: リソース単位の排他ロック (同一機器への同時アクセスを直列化)
         self._locks: dict[str, asyncio.Lock] = {}
+        # v0.6.0: bus 単位 semaphore (VISA I/O 中のみ保持)
+        # circular import 回避のため型注釈は遅延、引数で受ける
+        self._bus_manager = bus_manager
+
+    def set_bus_manager(self, bus_manager) -> None:
+        """ランタイムで BusManager を差し替え (system_config reload 対応)"""
+        self._bus_manager = bus_manager
 
     def _get_lock(self, resource_name: str) -> asyncio.Lock:
         """resource_name ごとの asyncio.Lock を返す (なければ生成)。
@@ -103,8 +110,14 @@ class VisaManager:
             except Exception as e:
                 raise VisaError(f"クエリ中にエラーが発生しました: {e}") from e
 
-        async with self._get_lock(resource_name):
-            return await self._run(_query)
+        # v0.6.0: bus semaphore → resource lock → I/O の順 (deadlock 回避)
+        if self._bus_manager is not None:
+            async with self._bus_manager.acquire(resource_name):
+                async with self._get_lock(resource_name):
+                    return await self._run(_query)
+        else:
+            async with self._get_lock(resource_name):
+                return await self._run(_query)
 
     async def write(
         self,
@@ -136,8 +149,13 @@ class VisaManager:
             except Exception as e:
                 raise VisaError(f"コマンド送信中にエラーが発生しました: {e}") from e
 
-        async with self._get_lock(resource_name):
-            await self._run(_write)
+        if self._bus_manager is not None:
+            async with self._bus_manager.acquire(resource_name):
+                async with self._get_lock(resource_name):
+                    await self._run(_write)
+        else:
+            async with self._get_lock(resource_name):
+                await self._run(_write)
 
     def close(self) -> None:
         if self._rm is not None:

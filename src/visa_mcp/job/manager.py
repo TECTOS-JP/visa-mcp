@@ -40,6 +40,14 @@ from visa_mcp.polling_executor import (
 )
 from visa_mcp.session_manager import SessionManager
 from visa_mcp.visa_manager import VisaManager
+# v0.6.0: group / map
+from visa_mcp.group import (
+    TargetExecution, FailurePolicy,
+    resolve_resource, resolve_unit_bindings, collect_target_resources,
+    ResolveError,
+)
+from visa_mcp.group.executor import GroupExecutor
+from visa_mcp.system_config import SystemConfig
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +104,7 @@ class JobManager:
         session_mgr: SessionManager,
         store: JobStore | None = None,
         scheduler: ResourceScheduler | None = None,
+        system_config: SystemConfig | None = None,
     ) -> None:
         self._visa = visa
         self._sessions = session_mgr
@@ -103,8 +112,31 @@ class JobManager:
         self._runtimes: dict[str, _JobRuntime] = {}
         # v0.5.0.2: Job 単位排他のための ResourceScheduler
         self._scheduler = scheduler or ResourceScheduler()
+        # v0.6.0: SystemConfig (alias/bus/groups/units 解決用)
+        self._system_config = system_config or SystemConfig()
         # 起動時に running/waiting/cancelling/queued を interrupted に遷移
         self._store.mark_interrupted_on_startup()
+
+    @property
+    def system_config(self) -> SystemConfig:
+        return self._system_config
+
+    def set_system_config(self, cfg: SystemConfig) -> None:
+        """ランタイムで system_config を差し替え (reload 対応)"""
+        self._system_config = cfg
+
+    def _session_for_alias_or_resource(self, ref: str) -> Any:
+        """alias 経由 resource 解決して session を返すヘルパ。
+
+        - ref が alias なら system_config から resource_name に変換
+        - ref が resource なら素通し
+        - どちらでもなければ get_session(ref) で再試行 (legacy)
+        """
+        try:
+            resource = self._system_config.resolve_alias(ref) or ref
+        except Exception:
+            resource = ref
+        return self._sessions.get_session(resource)
 
     @property
     def store(self) -> JobStore:
@@ -537,6 +569,414 @@ class JobManager:
             except Exception:
                 pass
             self._runtimes.pop(job_id, None)
+
+    # =====================================================================
+    # v0.6.0: Group / Map ジョブ
+    # =====================================================================
+
+    async def start_group_query_job(
+        self,
+        group_name: str,
+        command_name: str,
+        args: dict[str, Any] | None = None,
+        *,
+        concurrency: int = 10,
+        failure_policy: dict[str, Any] | None = None,
+        owner: str = "",
+        job_timeout_s: float | None = None,
+        queue_policy: QueuePolicy = "queue",
+    ) -> JobRecord:
+        """instrument_groups[group_name] の全機器に対し同じ query を投げる Job
+
+        各 instrument には個別 TargetExecution を作成。target_id = alias 名。
+        """
+        args = args or {}
+        # validation
+        group = self._system_config.get_group(group_name)
+        if group is None:
+            return self._record_immediate_failure(
+                resource_name="", recipe_name=f"<group:{group_name}>",
+                parameters={"group": group_name, "command": command_name, "args": args},
+                error_class="not_found",
+                summary=f"instrument_group '{group_name}' は定義されていません",
+            )
+        if not group.members:
+            return self._record_immediate_failure(
+                resource_name="", recipe_name=f"<group:{group_name}>",
+                parameters={"group": group_name},
+                error_class="validation",
+                summary=f"instrument_group '{group_name}' に members がいません",
+            )
+
+        # build TargetExecution per member
+        targets: list[TargetExecution] = []
+        required_resources_set: set[str] = set()
+        try:
+            for alias in group.members:
+                resource = self._system_config.resolve_alias(alias) or alias
+                plan = Plan(
+                    name=f"group_query:{command_name}",
+                    steps=[CommandStep(command=command_name, args=args)],
+                    required_resources=[resource],
+                )
+                targets.append(TargetExecution(
+                    target_id=alias,
+                    plan=plan,
+                    required_resources=[resource],
+                    bindings={},
+                    parameters=args,
+                ))
+                required_resources_set.add(resource)
+        except Exception as e:
+            return self._record_immediate_failure(
+                resource_name="", recipe_name=f"<group:{group_name}>",
+                parameters={"group": group_name},
+                error_class="validation",
+                summary=f"target build 失敗: {e}",
+            )
+
+        return await self._start_group_or_map_job(
+            kind="group_query",
+            recipe_label=f"<group_query:{group_name}.{command_name}>",
+            owner=owner,
+            parameters={
+                "group": group_name, "command": command_name,
+                "args": args, "concurrency": concurrency,
+            },
+            targets=targets,
+            required_resources=sorted(required_resources_set),
+            concurrency=concurrency,
+            failure_policy=failure_policy or {},
+            job_timeout_s=job_timeout_s,
+            queue_policy=queue_policy,
+        )
+
+    async def start_map_recipe_job(
+        self,
+        recipe_name: str,
+        targets_spec: list[dict[str, Any]],
+        *,
+        concurrency: int = 10,
+        failure_policy: dict[str, Any] | None = None,
+        owner: str = "",
+        job_timeout_s: float | None = None,
+        queue_policy: QueuePolicy = "queue",
+        primary_role: str | None = None,
+    ) -> JobRecord:
+        """recipe を異なる条件で各 target に並列適用
+
+        targets_spec: [
+          {
+            "target_id": "sample001",
+            "unit": "unit001",                     # 任意
+            "bindings": {"psu": "psu001", ...},    # 任意 (unit と merge)
+            "parameters": {"voltage": 1.0},
+          },
+          ...
+        ]
+
+        primary_role: recipe を解釈する際の主 instrument の役割名。
+        例 primary_role="psu" の場合、各 target の bindings["psu"] の YAML 定義から
+        recipe を取得する。指定なし時は全 target が同一 recipe 構造を持つことを期待し、
+        最初の target から推定。
+        """
+        if not targets_spec:
+            return self._record_immediate_failure(
+                resource_name="", recipe_name=f"<map:{recipe_name}>",
+                parameters={"recipe": recipe_name},
+                error_class="validation",
+                summary="targets が空です",
+            )
+
+        # build target executions
+        targets: list[TargetExecution] = []
+        all_resources: set[str] = set()
+        seen_ids: set[str] = set()
+
+        for spec in targets_spec:
+            target_id = str(spec.get("target_id") or "")
+            if not target_id:
+                return self._record_immediate_failure(
+                    resource_name="", recipe_name=f"<map:{recipe_name}>",
+                    parameters={"recipe": recipe_name},
+                    error_class="validation",
+                    summary="各 target に target_id が必須です",
+                )
+            if target_id in seen_ids:
+                return self._record_immediate_failure(
+                    resource_name="", recipe_name=f"<map:{recipe_name}>",
+                    parameters={"recipe": recipe_name},
+                    error_class="validation",
+                    summary=f"target_id 重複: '{target_id}'",
+                )
+            seen_ids.add(target_id)
+            try:
+                bindings = resolve_unit_bindings(
+                    spec.get("unit"), spec.get("bindings") or {},
+                    self._system_config,
+                )
+                if not bindings:
+                    return self._record_immediate_failure(
+                        resource_name="", recipe_name=f"<map:{recipe_name}>",
+                        parameters={"recipe": recipe_name},
+                        error_class="validation",
+                        summary=f"target {target_id}: bindings 空 (unit / bindings 未指定)",
+                    )
+                # primary alias の決定
+                p_role = primary_role
+                if p_role is None or p_role not in bindings:
+                    # 最初の binding を primary とみなす
+                    p_role = next(iter(bindings.keys()))
+                primary_alias = bindings[p_role]
+                primary_resource = self._system_config.resolve_alias(primary_alias) or primary_alias
+                primary_session = self._sessions.get_session(primary_resource)
+                if primary_session is None or primary_session.definition is None:
+                    return self._record_immediate_failure(
+                        resource_name="", recipe_name=f"<map:{recipe_name}>",
+                        parameters={"recipe": recipe_name},
+                        error_class="not_found",
+                        summary=(
+                            f"target {target_id}: primary instrument "
+                            f"{primary_alias} (→ {primary_resource}) は未識別です"
+                        ),
+                    )
+                recipe = primary_session.definition.recipes.get(recipe_name)
+                if recipe is None:
+                    return self._record_immediate_failure(
+                        resource_name="", recipe_name=f"<map:{recipe_name}>",
+                        parameters={"recipe": recipe_name},
+                        error_class="not_found",
+                        summary=f"recipe '{recipe_name}' が {primary_alias} に未定義",
+                    )
+                # parameters merge + plan 構築
+                variables = dict(spec.get("parameters") or {})
+                for p in recipe.parameters:
+                    if p.name not in variables and p.default is not None:
+                        variables[p.name] = p.default
+                plan = recipe_to_plan(
+                    recipe, variables, primary_resource=primary_resource,
+                )
+                # required_resources は plan.required_resources + bindings 全部
+                target_resources = collect_target_resources(bindings, self._system_config)
+                # plan.required_resources とマージ
+                all_for_target = sorted(set(plan.required_resources) | set(target_resources))
+                targets.append(TargetExecution(
+                    target_id=target_id,
+                    plan=plan,
+                    required_resources=all_for_target,
+                    bindings=bindings,
+                    parameters=variables,
+                ))
+                all_resources.update(all_for_target)
+            except (ResolveError, Exception) as e:
+                return self._record_immediate_failure(
+                    resource_name="", recipe_name=f"<map:{recipe_name}>",
+                    parameters={"recipe": recipe_name},
+                    error_class="validation",
+                    summary=f"target {target_id} build 失敗: {e}",
+                )
+
+        return await self._start_group_or_map_job(
+            kind="map_recipe",
+            recipe_label=f"<map_recipe:{recipe_name}>",
+            owner=owner,
+            parameters={"recipe": recipe_name, "target_count": len(targets), "concurrency": concurrency},
+            targets=targets,
+            required_resources=sorted(all_resources),
+            concurrency=concurrency,
+            failure_policy=failure_policy or {},
+            job_timeout_s=job_timeout_s,
+            queue_policy=queue_policy,
+        )
+
+    async def _start_group_or_map_job(
+        self,
+        *,
+        kind: str,
+        recipe_label: str,
+        owner: str,
+        parameters: dict[str, Any],
+        targets: list[TargetExecution],
+        required_resources: list[str],
+        concurrency: int,
+        failure_policy: dict[str, Any],
+        job_timeout_s: float | None,
+        queue_policy: QueuePolicy,
+    ) -> JobRecord:
+        """group_query / map_recipe ジョブ共通の登録 + scheduler 投入"""
+        job_id = self._new_job_id()
+        rec = self._store.create_job(
+            job_id=job_id, owner=owner,
+            resource_name=(required_resources[0] if required_resources else ""),
+            recipe=recipe_label,
+            parameters=parameters,
+        )
+
+        # scheduler enqueue
+        try:
+            immediate, blocking = await self._scheduler.enqueue(
+                job_id, required_resources, queue_policy=queue_policy,
+            )
+        except ResourceBusyError as e:
+            return self._store.transition_status(
+                job_id, JobStatus.FAILED,
+                error_class="blocked",
+                last_step_summary=f"resource busy (blocked by {e.blocking_job_id})",
+                result={
+                    "success": False, "error": "ResourceBusy",
+                    "message": str(e),
+                    "blocking_job_id": e.blocking_job_id,
+                    "queue_policy": queue_policy,
+                },
+            )
+
+        effective_timeout = (
+            DEFAULT_JOB_TIMEOUT_S if job_timeout_s is None else float(job_timeout_s)
+        )
+        deadline = time.monotonic() + effective_timeout if effective_timeout > 0 else None
+
+        task = asyncio.create_task(
+            self._run_group_or_map(
+                rec, targets, required_resources,
+                concurrency=concurrency,
+                failure_policy_dict=failure_policy,
+                start_immediately=immediate,
+            ),
+            name=f"job-{job_id}",
+        )
+        self._runtimes[job_id] = _JobRuntime(task, deadline)
+        if not immediate:
+            self._store.update_step(
+                job_id, -1,
+                last_step_summary=f"queued, blocked_by={blocking}",
+            )
+        return rec
+
+    async def _run_group_or_map(
+        self,
+        rec: JobRecord,
+        targets: list[TargetExecution],
+        required_resources: list[str],
+        *,
+        concurrency: int,
+        failure_policy_dict: dict[str, Any],
+        start_immediately: bool,
+    ) -> None:
+        """Group/Map ジョブの bg 実行本体"""
+        job_id = rec.job_id
+        try:
+            if not start_immediately:
+                await self._wait_until_scheduled(job_id)
+            await self._scheduler.on_running(job_id)
+
+            runtime = self._runtimes.get(job_id)
+            if runtime is None:
+                return
+            current = self._store.get(job_id)
+            if current is not None and is_terminal(current.status):
+                return
+
+            self._store.transition_status(job_id, JobStatus.RUNNING, current_step_index=0)
+            self._store.update_step(
+                job_id, 0,
+                last_step_summary=f"{rec.recipe} targets={len(targets)} concurrency={concurrency}",
+            )
+
+            executor = GroupExecutor(
+                self._visa,
+                session_resolver=self._session_for_alias_or_resource,
+            )
+
+            try:
+                policy = FailurePolicy.from_dict(failure_policy_dict)
+            except Exception as e:
+                self._store.transition_status(
+                    job_id, JobStatus.FAILED,
+                    error_class="validation",
+                    last_step_summary=f"failure_policy invalid: {e}",
+                    result={"success": False, "error": "ValidationError", "message": str(e)},
+                )
+                return
+
+            try:
+                summary_dict = await executor.run(
+                    targets,
+                    concurrency=concurrency,
+                    failure_policy=policy,
+                    cancel_check=lambda: self._poll_cancel_reason(runtime),
+                    on_progress=lambda p: self._update_progress(runtime, p),
+                )
+            finally:
+                runtime.current_progress = None
+
+            # status 判定 → SQLite 反映
+            status = summary_dict["status"]
+            if status == "ok":
+                final_status = JobStatus.COMPLETED
+            elif status == "partial_failure":
+                final_status = JobStatus.COMPLETED  # partial_failure も成功扱い
+            else:
+                final_status = JobStatus.FAILED
+
+            err_class = None
+            if status == "partial_failure":
+                err_class = "partial_failure"
+            elif status == "error":
+                err_class = "internal"
+
+            self._store.transition_status(
+                job_id, final_status,
+                error_class=err_class,
+                last_step_summary=(
+                    f"{rec.recipe} total={summary_dict['summary']['total']} "
+                    f"success={summary_dict['summary']['success']} "
+                    f"failed={summary_dict['summary']['failed']}"
+                ),
+                result={
+                    "success": status in ("ok", "partial_failure"),
+                    "recipe": rec.recipe,
+                    "group_or_map_status": status,
+                    "summary": summary_dict["summary"],
+                    "results": summary_dict["results"],
+                    "errors": summary_dict["errors"],
+                },
+            )
+
+        except asyncio.CancelledError:
+            self._safe_transition(job_id, JobStatus.CANCELLING)
+            try:
+                self._store.transition_status(
+                    job_id, JobStatus.CANCELLED,
+                    error_class="cancelled",
+                    last_step_summary="cancelled (immediate)",
+                    result={
+                        "success": False, "recipe": rec.recipe,
+                        "cancelled": True, "cancel_mode": "immediate",
+                    },
+                )
+            except Exception:
+                pass
+            raise
+        except Exception as e:
+            logger.exception("group/map job %s で予期しないエラー", job_id)
+            self._store.transition_status(
+                job_id, JobStatus.FAILED,
+                error_class="internal",
+                last_step_summary=f"unexpected: {e}",
+                result={"success": False, "error": "InternalError", "message": str(e)},
+            )
+        finally:
+            try:
+                next_jobs = await self._scheduler.on_terminal(job_id, required_resources)
+                for nj_id in next_jobs:
+                    self._wake_queued_job(nj_id)
+            except Exception:
+                pass
+            self._runtimes.pop(job_id, None)
+
+    # =====================================================================
+    # v0.5 API (続き)
+    # =====================================================================
 
     def get(self, job_id: str) -> JobRecord:
         rec = self._store.get(job_id)

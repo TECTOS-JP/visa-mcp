@@ -157,6 +157,9 @@ class RecipeStep(BaseModel):
     # args の値は文字列の場合 "$varname" や "$var * 1.1" のような式評価が可能
     result_as: str | None = None            # 後続ステップから ${steps.<result_as>} で参照 (v0.6.0+ で実装)
     description: str = ""
+    # v0.6.0: instrument logical ref ("$psu" / alias / resource)
+    # map_recipe で各 target ごとに違う instrument を指す場合に使用
+    instrument: str | None = None
     # wait step フィールド (v0.5.0-rc1)
     wait: dict[str, Any] | None = None      # 例: {"seconds": 60}
     # v0.5.1: polling / 絶対待機

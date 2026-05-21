@@ -124,11 +124,14 @@ def recipe_to_plan(
             ))
         else:  # command
             resolved_args = {k: resolve_arg(v, variables) for k, v in rs.args.items()}
+            # v0.6.0: instrument は logical ref ($psu / alias / resource_name) としてそのまま渡す。
+            # 実 resource への解決は Job executor / step_executor 側で行う。
             plan_steps.append(CommandStep(
                 command=rs.command or "",
                 args=resolved_args,
                 result_as=rs.result_as,
                 description=rs.description,
+                instrument=getattr(rs, "instrument", None),
             ))
 
     # required_resources: primary + aux を canonical sorted

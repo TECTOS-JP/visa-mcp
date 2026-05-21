@@ -1,0 +1,507 @@
+"""
+v0.6.0 GroupExecutor
+
+複数 TargetExecution を concurrency 制限付きで並列実行し、
+partial_failure を正常系として集約する共通 executor。
+
+設計原則 (実装方針 #11, #12):
+- Map Job 全体は親 Job 1 つ (子 Job を作らない)
+- 内部 concurrency で active targets を制限 (scheduler に 100 件一気に投げない)
+- 結果順序は安定 (入力 target_id 順)
+- partial_failure は status: "partial_failure" として正常系
+- target 全体 retry のみ実装 (step 部分 retry は v0.6.x スコープ外)
+
+呼び出し側は target を生成して run() を呼ぶだけ。
+"""
+from __future__ import annotations
+import asyncio
+import logging
+import time
+from typing import Any, Awaitable, Callable
+
+from visa_mcp.experiment_ir import (
+    CommandStep, Plan, WaitStep,
+    WaitUntilStep, WaitForConditionStep, WaitForStableStep,
+)
+from visa_mcp.group.target import TargetExecution, FailurePolicy
+from visa_mcp.session_manager import InstrumentSession
+from visa_mcp.step_executor import execute_command_step
+from visa_mcp.polling_executor import (
+    execute_wait_until,
+    execute_wait_for_condition,
+    execute_wait_for_stable,
+)
+from visa_mcp.visa_manager import VisaManager
+
+logger = logging.getLogger(__name__)
+
+
+# target 1 つの結果
+class TargetResult:
+    __slots__ = (
+        "target_id", "status", "data", "error_class", "error_message",
+        "attempts", "elapsed_s", "steps_executed",
+    )
+
+    def __init__(
+        self,
+        target_id: str,
+        status: str,
+        data: dict | None = None,
+        error_class: str | None = None,
+        error_message: str | None = None,
+        attempts: int = 1,
+        elapsed_s: float = 0.0,
+        steps_executed: list | None = None,
+    ) -> None:
+        # status: "ok" | "failed" | "skipped" | "cancelled"
+        self.target_id = target_id
+        self.status = status
+        self.data = data or {}
+        self.error_class = error_class
+        self.error_message = error_message
+        self.attempts = attempts
+        self.elapsed_s = elapsed_s
+        self.steps_executed = steps_executed or []
+
+    def to_dict(self) -> dict:
+        d: dict[str, Any] = {
+            "target_id": self.target_id,
+            "status": self.status,
+            "attempts": self.attempts,
+            "elapsed_s": round(self.elapsed_s, 3),
+        }
+        if self.status == "ok":
+            d["data"] = self.data
+        if self.error_class:
+            d["error_class"] = self.error_class
+        if self.error_message:
+            d["error_message"] = self.error_message
+        if self.steps_executed:
+            d["steps_executed"] = self.steps_executed
+        return d
+
+
+class GroupExecutor:
+    """concurrency / failure_policy / partial_failure / retry を司る共通 executor
+
+    cancel_check: 親 Job ランタイムからの cancel/timeout 要求を確認するコールバック。
+                  非 None を返したら "理由文字列" (cancel|timeout)。
+    on_progress:  進捗を runtime.current_progress に書き戻す callback。
+                  渡される dict は target counts 等。
+    """
+
+    def __init__(
+        self,
+        visa: VisaManager,
+        # alias_or_resource を InstrumentSession に解決する
+        session_resolver: Callable[[str], InstrumentSession | None],
+    ) -> None:
+        self._visa = visa
+        self._resolve_session = session_resolver
+
+    async def run(
+        self,
+        targets: list[TargetExecution],
+        *,
+        concurrency: int = 10,
+        failure_policy: FailurePolicy | None = None,
+        override_safety: bool = False,
+        override_reason: str = "",
+        cancel_check: Callable[[], str | None] | None = None,
+        on_progress: Callable[[dict], None] | None = None,
+    ) -> dict:
+        """
+        targets を並列実行する。返り値:
+          {
+            "status": "ok" | "partial_failure" | "error",
+            "summary": {"total","success","failed","skipped","retried"},
+            "results": [target_dict, ...]  # 入力順
+            "errors": [{target_id, error_class, ...}, ...],
+          }
+        """
+        failure_policy = failure_policy or FailurePolicy()
+        failure_policy.validate()
+        concurrency = max(1, int(concurrency))
+
+        total = len(targets)
+        # target_id 順を保持 (結果出力時の安定性)
+        order_index: dict[str, int] = {t.target_id: i for i, t in enumerate(targets)}
+        results: dict[str, TargetResult] = {}
+        retried_count = 0
+
+        # control flags
+        stop_requested = False  # failure_policy で未開始 target をスキップする要求
+        cancel_reason: str | None = None  # cancel/timeout 検出時の理由
+
+        # concurrency 制限
+        sem = asyncio.Semaphore(concurrency)
+
+        def _check_cancel() -> str | None:
+            nonlocal cancel_reason
+            if cancel_check is None:
+                return None
+            r = cancel_check()
+            if r:
+                cancel_reason = r
+            return r
+
+        def _emit_progress() -> None:
+            if on_progress is None:
+                return
+            counts = _count_status(results, total)
+            on_progress({
+                "type": "group_or_map",
+                "total": total,
+                "queued": counts["queued"],
+                "running": counts["running"],
+                "completed": counts["completed"],
+                "failed": counts["failed"],
+                "skipped": counts["skipped"],
+                "retrying": counts["retrying"],
+            })
+
+        async def _run_one(target: TargetExecution) -> None:
+            nonlocal retried_count
+            async with sem:
+                # 取得直後に cancel / stop 要求を再確認
+                if _check_cancel():
+                    results[target.target_id] = TargetResult(
+                        target.target_id, "skipped",
+                        error_class="cancelled",
+                        error_message=f"cancelled before start ({cancel_reason})",
+                    )
+                    _emit_progress()
+                    return
+                if stop_requested:
+                    results[target.target_id] = TargetResult(
+                        target.target_id, "skipped",
+                        error_class="policy_stop",
+                        error_message="未開始 target が failure_policy により skipped",
+                    )
+                    _emit_progress()
+                    return
+
+                # mark running (progress 用)
+                results[target.target_id] = TargetResult(target.target_id, "running")
+                _emit_progress()
+
+                attempts = 0
+                max_attempts = 1 + failure_policy.retry
+                t0 = time.monotonic()
+                last_result: TargetResult | None = None
+
+                while attempts < max_attempts:
+                    attempts += 1
+                    if attempts > 1:
+                        retried_count += 1
+                    res = await self._run_target_once(
+                        target,
+                        override_safety=override_safety,
+                        override_reason=override_reason,
+                        cancel_check=_check_cancel,
+                    )
+                    res.attempts = attempts
+                    res.elapsed_s = time.monotonic() - t0
+                    last_result = res
+                    # 終了状態が ok / cancelled / 致命的なら break
+                    if res.status in ("ok", "cancelled"):
+                        break
+                    # retry policy 残量チェック
+                    if attempts >= max_attempts:
+                        break
+                    # 次の retry まで間隔を空ける (短い)
+                    await asyncio.sleep(0.05)
+
+                results[target.target_id] = last_result or TargetResult(
+                    target.target_id, "failed",
+                    error_class="internal",
+                    error_message="no result",
+                )
+
+                # failure_policy 評価
+                _evaluate_policy()
+                _emit_progress()
+
+        def _evaluate_policy() -> None:
+            nonlocal stop_requested
+            if stop_requested:
+                return
+            if failure_policy.mode == "continue":
+                return
+            failed = sum(1 for r in results.values() if r.status == "failed")
+            done = sum(1 for r in results.values() if r.status in ("ok", "failed"))
+            if failure_policy.mode == "stop_on_first_error":
+                if failed >= 1:
+                    stop_requested = True
+                    logger.info(
+                        "group/map: stop_on_first_error - 未開始 target を skip",
+                    )
+            elif failure_policy.mode == "stop_if_failure_rate_exceeds":
+                if done > 0:
+                    rate = failed / done
+                    if rate > failure_policy.stop_if_failure_rate_exceeds_threshold:
+                        stop_requested = True
+                        logger.info(
+                            "group/map: failure_rate=%.2f > threshold, stop",
+                            rate,
+                        )
+
+        # 全 target を並列起動 (semaphore で concurrency 制限)
+        tasks = [asyncio.create_task(_run_one(t)) for t in targets]
+        try:
+            await asyncio.gather(*tasks, return_exceptions=False)
+        except asyncio.CancelledError:
+            # 親 Job が cancel された
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            # 未完 target を cancelled に
+            for t in targets:
+                if t.target_id not in results:
+                    results[t.target_id] = TargetResult(
+                        t.target_id, "cancelled",
+                        error_class="cancelled",
+                        error_message="parent job cancelled",
+                    )
+            raise
+
+        # 入力順で結果整列
+        ordered = sorted(
+            results.values(), key=lambda r: order_index.get(r.target_id, 0),
+        )
+
+        counts = _count_status(results, total, final=True)
+        # status 判定
+        if counts["failed"] > 0 or counts["skipped"] > 0 or counts["cancelled"] > 0:
+            if counts["completed"] > 0:
+                status = "partial_failure"
+            else:
+                status = "error"
+        else:
+            status = "ok"
+
+        errors = [
+            {
+                "target_id": r.target_id,
+                "error_class": r.error_class or "unknown",
+                "error_message": r.error_message,
+                "recoverable": True,
+            }
+            for r in ordered
+            if r.status in ("failed", "skipped", "cancelled")
+        ]
+
+        return {
+            "status": status,
+            "summary": {
+                "total": counts["total"],
+                "success": counts["completed"],
+                "failed": counts["failed"],
+                "skipped": counts["skipped"],
+                "cancelled": counts["cancelled"],
+                "retried": retried_count,
+            },
+            "results": [r.to_dict() for r in ordered],
+            "errors": errors,
+            "stopped_by_policy": stop_requested,
+            "cancel_reason": cancel_reason,
+        }
+
+    # ---------- 1 target 実行 ----------
+
+    async def _run_target_once(
+        self,
+        target: TargetExecution,
+        *,
+        override_safety: bool,
+        override_reason: str,
+        cancel_check: Callable[[], str | None],
+    ) -> TargetResult:
+        """1 target を Plan に従って実行 (cancel/timeout 即応、step 失敗で halt)"""
+        step_results: list[dict] = []
+
+        # CommandStep.instrument が "$role" の場合に bindings から resolve するヘルパ
+        def _resolve_step_instrument(step) -> InstrumentSession | None:
+            ref = getattr(step, "instrument", None)
+            # explicit ref ない場合: target.bindings に primary がいたらそれ、
+            # なければ required_resources[0] を session として返す
+            if ref is None:
+                # target が単一 resource なら自動でそれを使う
+                if len(target.required_resources) == 1:
+                    return self._resolve_session(target.required_resources[0])
+                # 複数の場合は明示が必要 → None で呼び出し元エラー
+                return None
+            if ref.startswith("$"):
+                role = ref[1:]
+                alias = target.bindings.get(role)
+                if not alias:
+                    return None
+                return self._resolve_session(alias)
+            return self._resolve_session(ref)
+
+        try:
+            for idx, step in enumerate(target.plan.steps):
+                r = cancel_check()
+                if r:
+                    return TargetResult(
+                        target.target_id, "cancelled",
+                        error_class="cancelled",
+                        error_message=f"cancelled mid-target ({r})",
+                        steps_executed=step_results,
+                    )
+
+                if isinstance(step, CommandStep):
+                    session = _resolve_step_instrument(step)
+                    if session is None or session.definition is None:
+                        return TargetResult(
+                            target.target_id, "failed",
+                            error_class="not_found",
+                            error_message=(
+                                f"step {idx}: instrument 解決失敗 "
+                                f"(ref={getattr(step, 'instrument', None)!r}, "
+                                f"bindings={target.bindings})"
+                            ),
+                            steps_executed=step_results,
+                        )
+                    res = await execute_command_step(
+                        self._visa, session, step,
+                        override_safety=override_safety,
+                        override_reason=override_reason,
+                    )
+                elif isinstance(step, WaitStep):
+                    # group/map 内 wait は短時間想定 → asyncio.sleep を slice
+                    res = await self._sleep_with_cancel(step.seconds, cancel_check)
+                    if res.get("interrupted_by_cancel"):
+                        return TargetResult(
+                            target.target_id, "cancelled",
+                            error_class="cancelled",
+                            steps_executed=step_results + [{"step": idx, **res}],
+                        )
+                elif isinstance(step, WaitUntilStep):
+                    res = await execute_wait_until(step, cancel_check=cancel_check)
+                elif isinstance(step, WaitForConditionStep):
+                    # 解決: ref が "$role" の場合は bindings 経由
+                    res = await execute_wait_for_condition(
+                        self._visa,
+                        lambda name: self._resolve_polling_session(name, target),
+                        step,
+                        cancel_check=cancel_check,
+                    )
+                elif isinstance(step, WaitForStableStep):
+                    res = await execute_wait_for_stable(
+                        self._visa,
+                        lambda name: self._resolve_polling_session(name, target),
+                        step,
+                        cancel_check=cancel_check,
+                    )
+                else:
+                    res = {
+                        "success": False,
+                        "error": "UnsupportedStepType",
+                        "step_type": getattr(step, "type", "?"),
+                    }
+
+                step_results.append({"step": idx, **res})
+
+                if not res.get("success", False):
+                    if res.get("interrupted_by_cancel"):
+                        return TargetResult(
+                            target.target_id, "cancelled",
+                            error_class="cancelled",
+                            steps_executed=step_results,
+                        )
+                    err_class = res.get("error", "internal")
+                    return TargetResult(
+                        target.target_id, "failed",
+                        error_class=err_class,
+                        error_message=str(
+                            res.get("message", res.get("error", "?"))
+                        )[:200],
+                        steps_executed=step_results,
+                    )
+
+            # 全 step ok
+            return TargetResult(
+                target.target_id, "ok",
+                data={"step_count": len(step_results)},
+                steps_executed=step_results,
+            )
+
+        except asyncio.CancelledError:
+            return TargetResult(
+                target.target_id, "cancelled",
+                error_class="cancelled",
+                error_message="task cancelled",
+                steps_executed=step_results,
+            )
+        except Exception as e:
+            logger.exception("target %s で予期しないエラー", target.target_id)
+            return TargetResult(
+                target.target_id, "failed",
+                error_class="internal",
+                error_message=str(e),
+                steps_executed=step_results,
+            )
+
+    def _resolve_polling_session(
+        self, ref: str, target: TargetExecution,
+    ) -> InstrumentSession | None:
+        """polling step の instrument ref を解決 (target.bindings を考慮)"""
+        if ref.startswith("$"):
+            role = ref[1:]
+            alias = target.bindings.get(role)
+            if not alias:
+                return None
+            return self._resolve_session(alias)
+        return self._resolve_session(ref)
+
+    async def _sleep_with_cancel(
+        self, seconds: float,
+        cancel_check: Callable[[], str | None],
+    ) -> dict:
+        """slice 方式 sleep (group target 内専用)"""
+        from visa_mcp.polling_executor import POLL_SLEEP_SLICE_S
+        remaining = float(seconds)
+        elapsed = 0.0
+        while remaining > 0:
+            r = cancel_check()
+            if r:
+                return {
+                    "step_type": "wait",
+                    "success": False,
+                    "interrupted_by_cancel": True,
+                    "error": r,
+                    "elapsed_s": elapsed,
+                }
+            chunk = min(remaining, POLL_SLEEP_SLICE_S)
+            await asyncio.sleep(chunk)
+            remaining -= chunk
+            elapsed += chunk
+        return {"step_type": "wait", "success": True, "seconds": seconds}
+
+
+def _count_status(
+    results: dict[str, TargetResult], total: int, final: bool = False,
+) -> dict[str, int]:
+    """進捗 progress と最終 summary 双方で使う counts。
+
+    final=True なら "queued" / "retrying" は 0 として返す (実行終了後の集計)。
+    """
+    completed = sum(1 for r in results.values() if r.status == "ok")
+    failed = sum(1 for r in results.values() if r.status == "failed")
+    skipped = sum(1 for r in results.values() if r.status == "skipped")
+    cancelled = sum(1 for r in results.values() if r.status == "cancelled")
+    running = sum(1 for r in results.values() if r.status == "running")
+    queued = max(0, total - len(results))
+    return {
+        "total": total,
+        "queued": queued if not final else 0,
+        "running": running if not final else 0,
+        "completed": completed,
+        "failed": failed,
+        "skipped": skipped,
+        "cancelled": cancelled,
+        "retrying": 0,  # v0.6.0 では別途集計しない
+    }

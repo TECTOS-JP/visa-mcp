@@ -280,12 +280,18 @@ def register_tools(mcp: FastMCP, job_mgr: JobManager) -> None:
                     data["queue"] = qinfo
             except Exception:
                 pass
-        # v0.5.1: polling 進捗の公開 (waiting 中の wait_for_condition / wait_for_stable / wait_until)
+        # v0.5.1: polling 進捗の公開
+        # v0.6.0: group/map 進捗 (type=group_or_map) も同じ data.progress に含める
         if rec.status in (JobStatus.WAITING, JobStatus.RUNNING):
             try:
                 prog = job_mgr.get_progress(rec.job_id)
                 if prog:
-                    data["polling"] = prog
+                    # group/map 進捗は data.progress、polling 進捗は data.polling
+                    # 同じ runtime.current_progress を共有しているため、type で振り分け
+                    if prog.get("type") == "group_or_map":
+                        data["progress"] = prog
+                    else:
+                        data["polling"] = prog
             except Exception:
                 pass
         return make_envelope("ok", data=data, job_id=rec.job_id)

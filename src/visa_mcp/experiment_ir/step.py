@@ -30,12 +30,19 @@ class CommandStep(BaseModel):
     `command` は機器定義の commands.<name> を参照するキー。
     `args` の値は文字列で "$" 始まりなら式評価 (recipe parameter を変数として参照)。
     `result_as` を指定すると後続ステップから ${steps.<result_as>} で参照可能 (v0.6.0+)。
+
+    v0.6.0 再導入:
+    `instrument` は logical role 参照 ("$psu" 形式) または alias / resource 名。
+    map_recipe の target 内で bindings 経由で実 resource に解決される。
+    省略時は Job の主 resource (start_recipe_job の resource_name) を使う。
     """
     type: Literal["command"] = "command"
     command: str
     args: dict[str, Any] = Field(default_factory=dict)
     result_as: str | None = None
     description: str = ""
+    # v0.6.0: logical instrument ref. None なら Job 主 resource を使用
+    instrument: str | None = None
 
 
 class WaitStep(BaseModel):

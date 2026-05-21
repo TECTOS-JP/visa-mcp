@@ -1,5 +1,214 @@
 # 変更履歴
 
+## v0.6.0 — Group / Map MVP
+
+v0.5 系の「単一 Job を安全に長時間実行する」段階から、
+**複数 resource を含む Job を並列にスケジューリングする** 段階へ移行。
+
+100 台規模の機器を 1 ツール呼び出しで操作できる Group / Map 基盤を導入。
+LLM が `start_map_recipe_job` 1 回で 100 サンプルの実験を投入できるようになる。
+
+### 新規 YAML 設定 (`instruments/_system.yaml`)
+
+per-instrument YAML とは独立した、システム全体のトポロジ定義ファイル。
+ファイルが存在しなくてもサーバは起動する (v0.5 系完全互換)。
+
+```yaml
+instruments:               # alias ↔ VISA resource_name + bus 帰属
+  psu001:
+    resource: "GPIB0::6::INSTR"
+    bus: "GPIB0"
+  temp001:
+    resource: "GPIB0::1::INSTR"
+
+buses:                     # バス単位の同時アクセス制限
+  GPIB0:
+    max_concurrency: 1     # GPIB は default 1
+
+instrument_groups:         # 同種機器の集合 (query_group 対象)
+  temp_meters:
+    members: [temp001, temp002, ...]
+
+experiment_units:          # 1 実験対象の機器セット (map_recipe 対象)
+  unit001:
+    psu: psu001
+    temp: temp001
+```
+
+`SystemConfig` Pydantic モデル + `from_yaml()` ローダーで読み込む
+(`src/visa_mcp/system_config.py`)。サンプル `instruments/_system.example.yaml` 同梱。
+
+### 新規 MCP ツール (4 個、合計 21 → 25)
+
+| ツール | 用途 |
+|--------|------|
+| `list_groups` | `instrument_groups` 一覧 |
+| `list_experiment_units` | `experiment_units` 一覧 |
+| `start_group_query_job` | グループ全機器に同じ query を並列 |
+| `start_map_recipe_job` | 異なる条件で各 unit に recipe 並列実行 |
+
+`get_group_status` / `execute_group_recipe` は新設せず、それぞれ
+`get_job_status.data.progress` / `start_map_recipe_job (同 parameters)` で代用。
+
+### `start_map_recipe_job` の入力仕様
+
+```json
+{
+  "recipe": "iv_point",
+  "targets": [
+    {
+      "target_id": "sample001",
+      "unit": "unit001",
+      "bindings": {"psu": "psu001_alt"},
+      "parameters": {"voltage": 1.0}
+    },
+    {
+      "target_id": "sample002",
+      "unit": "unit002",
+      "parameters": {"voltage": 1.5}
+    }
+  ],
+  "concurrency": 10,
+  "failure_policy": {"mode": "continue", "retry": 2},
+  "primary_role": "psu"
+}
+```
+
+`target_id` / `unit` / `bindings` / `parameters` の 4 フィールド分離は
+v0.8.0 Experiment DSL への自然な拡張を見据えた設計。
+
+### `CommandStep.instrument` 再導入 (logical ref)
+
+```yaml
+recipes:
+  iv_point:
+    steps:
+      - instrument: "$psu"
+        command: "set_voltage"
+        args: { voltage: "$voltage" }
+      - wait: { seconds: "$wait_s" }
+      - instrument: "$temp"
+        command: "measure_temperature"
+```
+
+`$psu` は `target.bindings["psu"]` 経由で実 resource_name に解決される。
+省略時は target の単一 resource (legacy 動作) を使う。
+v0.5.1.1 で削除した dead field を、map_recipe の bindings 機構と
+組み合わせて意味のあるフィールドとして復活。
+
+### `Plan.required_resources` の集約
+
+map_recipe の各 target は、`plan.required_resources + bindings 全 resources` を
+canonical sorted で持つ。ResourceScheduler に渡すことで、同じ resource を共有する
+複数 target が同時実行されないことを保証。
+
+### partial_failure を正常系として扱う
+
+100 台中 2 台 timeout でも、98 台分の成功結果と 2 台の `errors[]` を両方返す。
+
+```json
+{
+  "status": "partial_failure",
+  "summary": {"total": 100, "success": 98, "failed": 2, "skipped": 0, "retried": 3},
+  "results": [
+    {"target_id": "sample001", "status": "ok", "data": {...}},
+    ...
+  ],
+  "errors": [
+    {"target_id": "sample057", "error_class": "timeout", "recoverable": true}
+  ]
+}
+```
+
+エージェントが「失敗した 2 台だけ retry」を判断できる。
+
+### `failure_policy`
+
+```yaml
+failure_policy:
+  mode: "continue" | "stop_on_first_error" | "stop_if_failure_rate_exceeds"
+  retry: 2                                  # target 全体 retry (step 部分 retry なし)
+  stop_if_failure_rate_exceeds: 0.5
+```
+
+- `continue`: 失敗を記録、他 target は継続
+- `stop_on_first_error`: 最初の失敗で未開始 target を skipped に
+- `stop_if_failure_rate_exceeds`: 失敗率閾値超過で未開始 target を skipped
+
+### BusManager (新規)
+
+`src/visa_mcp/bus_manager.py`:
+
+- bus 単位 `asyncio.Semaphore` (lazy 生成)
+- VisaManager の query/write で **VISA 通信中のみ** acquire
+  (Job 全体ではなく、GPIB を 60 秒 wait で塞がない設計)
+- GPIB は default `max_concurrency=1` (resource_name から自動推定)
+- ResourceScheduler とは独立
+  (deadlock 回避: Job lock → bus semaphore → resource lock の固定順序)
+
+### GroupExecutor (新規、共通 executor)
+
+`src/visa_mcp/group/executor.py`:
+
+`query_group` と `map_recipe` を内部で同一 IR (`TargetExecution`) に集約。
+concurrency / failure_policy / partial_failure aggregation / retry / cancel /
+stable result order を共通実装。
+
+### get_job_status に group/map 進捗
+
+```json
+{
+  "data": {
+    "status": "running",
+    "progress": {
+      "type": "group_or_map",
+      "total": 100, "queued": 70, "running": 10, "completed": 18,
+      "failed": 2, "skipped": 0, "retrying": 0
+    }
+  }
+}
+```
+
+v0.5.1 の `data.polling` と同じ `runtime.current_progress` 経由で公開。
+type で振り分けて `data.progress` か `data.polling` のどちらかに格納。
+
+### 実装方針 (visa_mcp_v0.6.0の実装方針.md) で採用した核心 5 点
+
+1. Group / Map 系は全て **Job として実行** (同期ツール無し)
+2. `experiment_units` を `map_recipe` の中心概念
+3. resource lock = Job/target 全体、**bus semaphore = VISA 通信中のみ**
+4. `partial_failure` は正常系
+5. Map Job = **親 Job 1 つ** (子 Job 作らず、案 A 採用)
+
+### スコープ外 (将来バージョン)
+
+- targets を子 Job として永続化 (v0.7.0)
+- target 単位 resume (v0.9.0+)
+- throughput 最適化 scheduler / queue 追い越し / dynamic load balancing
+- branch / loop / barrier / stagger (v0.6.1 / v0.8.0)
+- retry_safe_shutdown_before_retry (予約フィールドのみ実装)
+
+### テスト (20 件追加、合計 271 passed)
+
+`tests/test_group_map_v060.py`:
+
+- SystemConfig ローダー (yaml / GPIB 自動推定 / 欠落ファイル)
+- Resolver ($role / alias / direct resource / canonical sort)
+- BusManager (GPIB default 1 / 不明 bus 素通し)
+- GroupExecutor (全成功 / partial_failure continue / stop_on_first_error / retry)
+- JobManager (group_query 結果順序 / 未知 group / map_recipe with bindings)
+- **必須 3 件**:
+  - `test_resource_lock_prevents_shared_resource_targets_from_overlapping`
+  - `test_bus_manager_gpib_default_concurrency_1`
+  - `test_group_executor_partial_failure_continue`
+
+### 後方互換
+
+既存 21 MCP ツール / v0.5.1.1 YAML / v0.4.x recipe はすべて不変。
+`_system.yaml` 無しでも v0.5.1.1 と完全に同じ挙動。
+
+---
+
 ## v0.5.1.1 — 外部レビュー対応 (P0/P1)
 
 v0.5.1 公開後の外部レビューで指摘された P0 二件 + P1 四件への対応。

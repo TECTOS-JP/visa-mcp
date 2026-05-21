@@ -1,5 +1,194 @@
 # 変更履歴
 
+## v0.6.1 — Barrier / Stagger
+
+v0.6.0 / v0.6.0.1 で固めた Group/Map MVP の上に、**target 間同期点 (barrier)** と
+**意図的な順次起動 (stagger)** を追加。100 台の電源を `OUTP ON` するときの
+突入電流を避ける、複数 target が同じ設定完了を待ち合わせてから次に進む、
+といった実験パターンが表現できるようになる。
+
+### 実装方針 (visa_mcp_v0.6.1の実装方針.md) 採用 5 点
+
+1. Barrier は **Group/Map executor の同期機構** (target-local Plan step ではなく)
+2. Barrier 待ち中は **target-level resource lock を解放** (deadlock 回避)
+3. `failure_policy=continue` では失敗 target を **barrier 対象から自動除外**
+4. Stagger は **特定 step 開始** に適用 (`CommandStep.stagger_ms`)
+5. progress に `barrier_name / arrived / waiting_for / total_expected` 等
+
+### 新規 IR
+
+**`BarrierStep`** (`src/visa_mcp/experiment_ir/step.py`):
+
+```python
+class BarrierStep(BaseModel):
+    type: Literal["barrier"] = "barrier"
+    name: str
+    timeout_s: float = 60.0
+    description: str = ""
+```
+
+`barrier_key = (name, step_index)` で識別。同 name でも step_index 違いは別物。
+timeout_s 必須 (無限待ち禁止)。
+
+**`CommandStep.stagger_ms`** (`int | None`):
+
+```yaml
+steps:
+  - command: set_output
+    args: { state: "ON" }
+    stagger_ms: 100      # target_index × 100ms ずつずらして起動
+```
+
+target_index は GroupExecutor が入力順 (0-indexed) で割り当て。
+0 〜 600,000ms (10 分) の範囲。
+
+### YAML 拡張 (RecipeStep)
+
+```yaml
+recipes:
+  synchronized_output_on:
+    parameters: []
+    steps:
+      - command: set_voltage
+        instrument: "$psu"
+        args: { voltage: 5 }
+      - barrier:
+          name: all_voltage_set
+          timeout_s: 60
+      - command: set_output
+        instrument: "$psu"
+        args: { state: "ON" }
+        stagger_ms: 100
+```
+
+`barrier` フィールドは必須 `name` と任意 `timeout_s` を持つ。
+既存 5 種 step フィールド (`command/wait/wait_until/wait_for_condition/wait_for_stable`)
+に加えて `barrier` が 6 番目の排他オプションになる。
+
+### BarrierCoordinator (新規)
+
+`src/visa_mcp/group/barrier.py`:
+
+```python
+coord = BarrierCoordinator()
+coord.register_targets(["t1", "t2", "t3"])
+# target 失敗時に呼ぶ → 残り participants で barrier 成立可能に
+coord.exclude_target("t2")
+# 各 target が arrive で待機
+result = await coord.arrive("b1", step_index=2, target_id="t1",
+                              timeout_s=60.0, cancel_check=...)
+```
+
+- `(name, step_index)` で barrier を識別
+- arrive 時点で対象 target 数を確定 (excluded を除く)
+- slice 方式 wait (cancel/timeout に即応)
+- `current_barrier_progress()` で active barrier 状態を返す
+
+### GroupExecutor 統合
+
+barrier 待ち中の deadlock 回避処理:
+
+```python
+# barrier 到達直前
+for lk in acquired_locks:
+    lk.release()
+try:
+    await barrier_coord.arrive(...)
+finally:
+    # canonical sorted 順で再取得
+    for lk in acquired_locks:
+        await lk.acquire()
+```
+
+これにより `target1 が lock を持ったまま target2 を待つ` deadlock が起きない。
+親 Job 全体 lock があるので外部 Job からは触られない (現状 v0.6.0 設計と整合)。
+
+target が失敗 / cancelled になると、自動的に
+`barrier_coord.exclude_target(target_id)` が呼ばれ、残り target で barrier 成立可能に。
+
+### Stagger 実装
+
+CommandStep 実行直前に:
+
+```python
+stagger_s = step.stagger_ms / 1000.0 * target.target_index
+if stagger_s > 0:
+    # slice 方式 sleep (POLL_SLEEP_SLICE_S=0.2s で cancel 即応)
+    while remaining > 0:
+        if cancel_check(): return cancelled
+        await asyncio.sleep(min(remaining, 0.2))
+        remaining -= 0.2
+```
+
+target_index は GroupExecutor.run() 内で `enumerate(targets)` により入力順で
+0..N-1 に確定。`asyncio.as_completed()` の完了順ではなく必ず入力順で stagger される。
+
+### `execute_recipe` で barrier を含む recipe を reject
+
+v0.5.1.1 で polling 系を拒否したのと同様、`barrier` を含む recipe を同期
+`execute_recipe` で実行しようとすると `AsyncStepRequiresJob` を返す。
+誘導先は **`start_map_recipe_job`** (barrier は target 間同期なので Map Job 必須)。
+
+### progress 公開
+
+GroupExecutor の `on_progress` callback が、active barrier がある間は
+`data.progress` に barrier 情報を含める:
+
+```json
+{
+  "type": "group_or_map",
+  "total": 100, "completed": 18, "running": 10, ...,
+  "barrier": {
+    "type": "barrier",
+    "barrier_name": "all_voltage_set",
+    "step_index": 1,
+    "arrived": 97,
+    "total_expected": 98,
+    "waiting_for": ["t023", "t057"],
+    "elapsed_s": 12.4
+  }
+}
+```
+
+エージェントは「barrier all_voltage_set で 97/98 到達、t023 と t057 を待ち中」と判断可能。
+
+### スコープ外 (将来バージョン)
+
+- quorum barrier (`% 以上到達で進む`)
+- nested barrier / branch/loop 内 barrier
+- distributed multi-server barrier
+- target 永続化 / barrier resume
+- dynamic stagger 調整
+- `cancel_running_on_policy_stop` の実装 (v0.6.0.1 から引き続き予約フィールド)
+- Map Job 全体一括 lock → target 単位 acquire/release (v0.7.0)
+
+### テスト (15 件追加、合計 293 passed)
+
+`tests/test_barrier_stagger_v061.py`:
+
+- IR validation (name 非空、timeout_s 正、stagger_ms 範囲)
+- BarrierCoordinator (全到達 / timeout / exclude / cancel)
+- **必須 3 件**:
+  - `test_barrier_does_not_hold_target_resource_lock_deadlock` (同 resource を共有する
+    2 target が barrier で deadlock しないこと)
+  - `test_stagger_starts_targets_in_input_order` (resource 完了順ではなく入力順)
+  - `test_partial_failure_with_barrier_continue` (失敗 target が barrier 除外され
+    残り target で成立)
+- `test_stagger_zero_means_no_delay`
+- `test_barrier_timeout_in_executor`
+- `test_stagger_respects_cancel`
+- `test_get_job_status_reports_barrier_progress`
+- `test_execute_recipe_rejects_barrier_step`
+
+### 後方互換
+
+既存 25 MCP ツール / v0.6.0.1 YAML / v0.4.x recipe はすべて不変。
+v0.6.0.1 で動いていたパターンは v0.6.1 でも完全に動く。
+新規追加は `RecipeStep.barrier` / `RecipeStep.stagger_ms` / `BarrierStep` /
+`CommandStep.stagger_ms` の **オプション追加** のみ。
+
+---
+
 ## v0.6.0.1 — 外部レビュー対応 (P0/P1)
 
 v0.6.0 公開後の外部レビューで指摘された **同一 Map Job 内部の target 間 resource 競合**

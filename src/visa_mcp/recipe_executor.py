@@ -22,6 +22,7 @@ from typing import Any
 from .experiment_ir import (
     CommandStep, Plan, Step, WaitStep,
     WaitUntilStep, WaitForConditionStep, WaitForStableStep,
+    BarrierStep,
 )
 from .models.instrument_def import InstrumentDefinition, RecipeDefinition, RecipeStep
 from .step_executor import execute_command_step, execute_wait_step
@@ -122,6 +123,13 @@ def recipe_to_plan(
                 max_consecutive_errors=int(wfs.get("max_consecutive_errors", 3)),
                 description=rs.description,
             ))
+        elif st == "barrier":
+            br = dict(rs.barrier)
+            plan_steps.append(BarrierStep(
+                name=br["name"],
+                timeout_s=float(resolve_arg(br.get("timeout_s", 60.0), variables)),
+                description=rs.description,
+            ))
         else:  # command
             resolved_args = {k: resolve_arg(v, variables) for k, v in rs.args.items()}
             # v0.6.0: instrument は logical ref ($psu / alias / resource_name) としてそのまま渡す。
@@ -132,6 +140,7 @@ def recipe_to_plan(
                 result_as=rs.result_as,
                 description=rs.description,
                 instrument=getattr(rs, "instrument", None),
+                stagger_ms=getattr(rs, "stagger_ms", None),
             ))
 
     # required_resources: primary + aux を canonical sorted
@@ -175,26 +184,35 @@ async def execute_plan(
 
     step_results: list[dict] = []
 
-    # v0.5.1.1: polling 系 step は同期 execute_recipe では実行不可。
+    # v0.5.1.1 / v0.6.1: polling / barrier 系 step は同期 execute_recipe では実行不可。
     # LLM が誤って execute_recipe を選んだ場合に分かりやすく Job 化を促す。
+    # barrier は Map Job 内の target 間同期なので、単一 target の execute_recipe では
+    # 永遠に成立しない (1 つの target だけが arrive して全 target 揃わない)。
     for s in plan.steps:
-        if isinstance(s, (WaitUntilStep, WaitForConditionStep, WaitForStableStep)):
+        if isinstance(s, (WaitUntilStep, WaitForConditionStep, WaitForStableStep, BarrierStep)):
+            is_barrier = isinstance(s, BarrierStep)
             return {
                 "success": False,
                 "recipe": recipe_name or plan.name,
                 "error": "AsyncStepRequiresJob",
                 "message": (
-                    "wait_until / wait_for_condition / wait_for_stable を含む recipe は "
-                    "execute_recipe では実行できません。**start_recipe_job** を使ってください。"
-                    " (進捗は get_job_status、完了結果は get_job_result で取得)"
+                    "wait_until / wait_for_condition / wait_for_stable / barrier を含む recipe は "
+                    "execute_recipe では実行できません。"
+                    + ("**start_map_recipe_job** を使ってください "
+                       "(barrier は target 間同期のため Map Job で意味を持ちます)。"
+                       if is_barrier else
+                       "**start_recipe_job** を使ってください。")
+                    + " (進捗は get_job_status、完了結果は get_job_result で取得)"
                 ),
                 "async_step_type": getattr(s, "type", "?"),
                 "recommended_action": {
-                    "tool": "start_recipe_job",
-                    "args": {
-                        "resource_name": "<同じ resource>",
-                        "recipe_name": recipe_name or plan.name,
-                    },
+                    "tool": "start_map_recipe_job" if is_barrier else "start_recipe_job",
+                    "args": (
+                        {"recipe": recipe_name or plan.name, "targets": "<target list>"}
+                        if is_barrier else
+                        {"resource_name": "<同じ resource>",
+                         "recipe_name": recipe_name or plan.name}
+                    ),
                 },
                 "steps_executed": [],
             }

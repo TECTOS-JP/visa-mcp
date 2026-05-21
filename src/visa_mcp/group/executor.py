@@ -22,7 +22,9 @@ from typing import Any, Awaitable, Callable
 from visa_mcp.experiment_ir import (
     CommandStep, Plan, WaitStep,
     WaitUntilStep, WaitForConditionStep, WaitForStableStep,
+    BarrierStep,
 )
+from visa_mcp.group.barrier import BarrierCoordinator
 from visa_mcp.group.target import TargetExecution, FailurePolicy
 from visa_mcp.session_manager import InstrumentSession
 from visa_mcp.step_executor import execute_command_step
@@ -172,8 +174,16 @@ class GroupExecutor:
         total = len(targets)
         # target_id 順を保持 (結果出力時の安定性)
         order_index: dict[str, int] = {t.target_id: i for i, t in enumerate(targets)}
+        # v0.6.1: stagger 順序保証のため target_index を割り当て (入力順)
+        for i, t in enumerate(targets):
+            t.target_index = i
+
         results: dict[str, TargetResult] = {}
         retried_count = 0
+
+        # v0.6.1: BarrierCoordinator (Job 内同期)
+        barrier_coord = BarrierCoordinator()
+        barrier_coord.register_targets([t.target_id for t in targets])
 
         # control flags
         stop_requested = False  # failure_policy で未開始 target をスキップする要求
@@ -195,7 +205,7 @@ class GroupExecutor:
             if on_progress is None:
                 return
             counts = _count_status(results, total)
-            on_progress({
+            p = {
                 "type": "group_or_map",
                 "total": total,
                 "queued": counts["queued"],
@@ -204,7 +214,12 @@ class GroupExecutor:
                 "failed": counts["failed"],
                 "skipped": counts["skipped"],
                 "retrying": counts["retrying"],
-            })
+            }
+            # v0.6.1: 現在 active な barrier があれば付与
+            br = barrier_coord.current_barrier_progress()
+            if br is not None:
+                p["barrier"] = br
+            on_progress(p)
 
         async def _run_one(target: TargetExecution) -> None:
             nonlocal retried_count
@@ -282,6 +297,9 @@ class GroupExecutor:
                         override_safety=override_safety,
                         override_reason=override_reason,
                         cancel_check=_check_cancel,
+                        # v0.6.1: barrier coordinator + target-level lock 制御を渡す
+                        barrier_coord=barrier_coord,
+                        acquired_locks=acquired_locks,
                     )
                     res.attempts = attempts
                     res.elapsed_s = time.monotonic() - t0
@@ -294,6 +312,11 @@ class GroupExecutor:
                         break
                     # 次の retry まで間隔を空ける (短い)
                     await asyncio.sleep(0.05)
+
+                # v0.6.1: target が失敗 / cancelled なら barrier から除外
+                # (他 target が待ち続けて deadlock するのを防ぐ)
+                if last_result and last_result.status != "ok":
+                    barrier_coord.exclude_target(target.target_id)
 
                 results[target.target_id] = last_result or TargetResult(
                     target.target_id, "failed",
@@ -403,8 +426,16 @@ class GroupExecutor:
         override_safety: bool,
         override_reason: str,
         cancel_check: Callable[[], str | None],
+        barrier_coord: "BarrierCoordinator | None" = None,
+        acquired_locks: list[asyncio.Lock] | None = None,
     ) -> TargetResult:
-        """1 target を Plan に従って実行 (cancel/timeout 即応、step 失敗で halt)"""
+        """1 target を Plan に従って実行 (cancel/timeout 即応、step 失敗で halt)
+
+        v0.6.1:
+        - barrier_coord が指定されていれば BarrierStep を coordinator 経由で同期
+        - barrier 待ち中は target-level lock を解放し、終了後に再取得 (deadlock 回避)
+        - CommandStep.stagger_ms と target.target_index に基づいて step 開始遅延
+        """
         step_results: list[dict] = []
 
         # CommandStep.instrument が "$role" の場合に bindings から resolve するヘルパ
@@ -437,7 +468,62 @@ class GroupExecutor:
                         steps_executed=step_results,
                     )
 
-                if isinstance(step, CommandStep):
+                if isinstance(step, BarrierStep):
+                    if barrier_coord is None:
+                        # 単一 target 経路で barrier に到達した → no-op として通すか
+                        # 不整合エラーかは仕様次第。execute_recipe では事前に reject 済み。
+                        # safety net として success=True で素通し。
+                        res = {
+                            "step_type": "barrier", "success": True,
+                            "barrier_name": step.name,
+                            "note": "no coordinator (single-target path)",
+                        }
+                    else:
+                        # v0.6.1: barrier 待ち中は target-level resource lock を解放。
+                        # これにより 「target1 が lock を持ったまま target2 を待つ」
+                        # deadlock を回避する。親 Job lock があるので外部からは触られない。
+                        released_locks = acquired_locks or []
+                        for lk in released_locks:
+                            try:
+                                lk.release()
+                            except RuntimeError:
+                                pass
+                        try:
+                            br_res = await barrier_coord.arrive(
+                                name=step.name,
+                                step_index=idx,
+                                target_id=target.target_id,
+                                timeout_s=step.timeout_s,
+                                cancel_check=cancel_check,
+                            )
+                        finally:
+                            # 再取得 (lock 順序固定で他 target との deadlock 回避)
+                            # canonical sorted は acquired_locks の元順序が保たれている前提
+                            # (acquired は _acquire_target_resources 内で sorted 取得済み)
+                            for lk in released_locks:
+                                await lk.acquire()
+                        res = {"step_type": "barrier", **br_res}
+                elif isinstance(step, CommandStep):
+                    # v0.6.1: stagger 適用 (CommandStep.stagger_ms が指定されていれば)
+                    if step.stagger_ms is not None and step.stagger_ms > 0:
+                        stagger_s = step.stagger_ms / 1000.0 * target.target_index
+                        if stagger_s > 0:
+                            # slice 方式で cancel 即応
+                            from visa_mcp.polling_executor import POLL_SLEEP_SLICE_S
+                            remaining = stagger_s
+                            while remaining > 0:
+                                r = cancel_check()
+                                if r:
+                                    return TargetResult(
+                                        target.target_id, "cancelled",
+                                        error_class="cancelled",
+                                        error_message=f"cancelled during stagger ({r})",
+                                        steps_executed=step_results,
+                                    )
+                                chunk = min(remaining, POLL_SLEEP_SLICE_S)
+                                await asyncio.sleep(chunk)
+                                remaining -= chunk
+
                     session = _resolve_step_instrument(step)
                     if session is None or session.definition is None:
                         return TargetResult(

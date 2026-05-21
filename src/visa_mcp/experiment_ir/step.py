@@ -43,6 +43,23 @@ class CommandStep(BaseModel):
     description: str = ""
     # v0.6.0: logical instrument ref. None なら Job 主 resource を使用
     instrument: str | None = None
+    # v0.6.1: step 開始の意図的な遅延 (ms)
+    # Map Job の各 target が同じ command step を実行する際、target_index に応じた
+    # 遅延 (target_index * stagger_ms / 1000) を入れて突入電流等を避ける。
+    # 単一 Job / 通常 recipe では効果なし (target_index=0 のみ)。
+    # None なら遅延なし。
+    stagger_ms: int | None = None
+
+    @field_validator("stagger_ms")
+    @classmethod
+    def _stagger_nonneg(cls, v: int | None) -> int | None:
+        if v is not None and v < 0:
+            raise ValueError(f"stagger_ms は 0 以上である必要があります: {v}")
+        if v is not None and v > 600_000:  # 10 分上限 (誤入力防止)
+            raise ValueError(
+                f"stagger_ms は最大 600000 (10 分) です: {v}"
+            )
+        return v
 
 
 class WaitStep(BaseModel):
@@ -225,11 +242,55 @@ class WaitForStableStep(_PollingCommon):
         return self
 
 
+# ============================================================
+# v0.6.1: Barrier (Group/Map 同期点)
+# ============================================================
+
+
+class BarrierStep(BaseModel):
+    """v0.6.1: Group/Map Job 内の target 間同期点。
+
+    複数 target が同じ name の BarrierStep に到達するまで待機し、
+    全 target 到達 (または failure_policy で除外された target を除いて) で
+    次 step へ進む。
+
+    重要 (実装方針):
+      - **barrier 待ち中は target-level resource lock を解放する**
+        (deadlock 回避: 親 Job lock があるので外部からは触られない)
+      - **失敗 target は barrier 対象から自動除外** (failure_policy=continue 時)
+      - barrier_key = (name, step_index) ── 同一 name でも step_index が違えば別物
+      - timeout_s 必須 (無限待ち禁止)
+
+    対応範囲 (v0.6.1 MVP):
+      - same Map/Group Job 内 target 間 barrier のみ
+      - quorum / nested / target-local Plan 内 barrier は未対応
+    """
+    type: Literal["barrier"] = "barrier"
+    name: str
+    timeout_s: float = 60.0
+    description: str = ""
+
+    @field_validator("name")
+    @classmethod
+    def _name_nonempty(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("BarrierStep.name は空にできません")
+        return v
+
+    @field_validator("timeout_s")
+    @classmethod
+    def _timeout_positive(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError(f"BarrierStep.timeout_s は正の値: {v}")
+        return v
+
+
 # discriminated union: type フィールドで自動的に正しいモデルが選ばれる
 Step = Annotated[
     Union[
         CommandStep, WaitStep, WaitUntilStep,
         WaitForConditionStep, WaitForStableStep,
+        BarrierStep,
     ],
     Field(discriminator="type"),
 ]

@@ -13,6 +13,7 @@ from visa_mcp.experiment_ir.step import (
     WaitUntilStep,
     WaitForConditionStep,
     WaitForStableStep,
+    BarrierStep,
     Step,
 )
 from visa_mcp.experiment_ir.plan import Plan
@@ -23,6 +24,7 @@ __all__ = [
     "WaitUntilStep",
     "WaitForConditionStep",
     "WaitForStableStep",
+    "BarrierStep",
     "Step",
     "Plan",
 ]

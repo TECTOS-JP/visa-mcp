@@ -24,6 +24,10 @@ class TargetExecution:
     bindings: dict[str, str] = field(default_factory=dict)   # logical role → alias
     parameters: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
+    # v0.6.1: stagger 順序保証用 (入力 target 順、0-indexed)。
+    # CommandStep.stagger_ms が指定されている場合、target_index * stagger_ms / 1000 だけ
+    # step 開始を遅延させる。
+    target_index: int = 0
 
 
 @dataclass

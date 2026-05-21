@@ -160,12 +160,16 @@ class RecipeStep(BaseModel):
     # v0.6.0: instrument logical ref ("$psu" / alias / resource)
     # map_recipe で各 target ごとに違う instrument を指す場合に使用
     instrument: str | None = None
+    # v0.6.1: 特定 step の開始遅延 (ms)。Map Job の target_index に応じた stagger を入れる
+    stagger_ms: int | None = None
     # wait step フィールド (v0.5.0-rc1)
     wait: dict[str, Any] | None = None      # 例: {"seconds": 60}
     # v0.5.1: polling / 絶対待機
     wait_until: dict[str, Any] | None = None
     wait_for_condition: dict[str, Any] | None = None
     wait_for_stable: dict[str, Any] | None = None
+    # v0.6.1: barrier (Map/Group Job 内 target 間同期)
+    barrier: dict[str, Any] | None = None    # {"name": "...", "timeout_s": 60.0}
 
     @model_validator(mode="after")
     def _exactly_one_step_type(self) -> "RecipeStep":
@@ -175,17 +179,18 @@ class RecipeStep(BaseModel):
             "wait_until":         self.wait_until is not None,
             "wait_for_condition": self.wait_for_condition is not None,
             "wait_for_stable":    self.wait_for_stable is not None,
+            "barrier":            self.barrier is not None,
         }
         active = [k for k, v in flags.items() if v]
         if len(active) > 1:
             raise ValueError(
                 f"RecipeStep には command / wait / wait_until / wait_for_condition / "
-                f"wait_for_stable のうち 1 つだけを指定してください (検出: {active})"
+                f"wait_for_stable / barrier のうち 1 つだけを指定してください (検出: {active})"
             )
         if not active:
             raise ValueError(
                 "RecipeStep には command / wait / wait_until / wait_for_condition / "
-                "wait_for_stable のいずれかが必須です"
+                "wait_for_stable / barrier のいずれかが必須です"
             )
 
         if flags["wait"]:
@@ -232,6 +237,11 @@ class RecipeStep(BaseModel):
                     "wait_until: timestamp または seconds_from_now のいずれかが必須です"
                 )
 
+        if flags["barrier"]:
+            br = self.barrier
+            if "name" not in br or not br["name"]:
+                raise ValueError("barrier には name が必須です")
+
         return self
 
     @property
@@ -241,6 +251,7 @@ class RecipeStep(BaseModel):
         if self.wait_until is not None: return "wait_until"
         if self.wait_for_condition is not None: return "wait_for_condition"
         if self.wait_for_stable is not None: return "wait_for_stable"
+        if self.barrier is not None: return "barrier"
         return "command"
 
 

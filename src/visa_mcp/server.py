@@ -9,6 +9,8 @@ from visa_mcp.instrument_registry import InstrumentRegistry
 from visa_mcp.visa_manager import VisaManager
 from visa_mcp.session_manager import SessionManager
 from visa_mcp.tools import discovery, commands, pdf_extractor, info, recipes
+from visa_mcp.tools import jobs as jobs_tools
+from visa_mcp.job import JobManager
 from visa_mcp import safety as sf
 
 logging.basicConfig(
@@ -46,11 +48,13 @@ mcp = FastMCP(
 visa_mgr = VisaManager()
 registry = InstrumentRegistry(INSTRUMENTS_DIR)
 session_mgr = SessionManager(visa_mgr, registry)
+job_mgr = JobManager(visa_mgr, session_mgr)
 
 discovery.register_tools(mcp, session_mgr)
 commands.register_tools(mcp, session_mgr)
 info.register_tools(mcp, session_mgr)
 recipes.register_tools(mcp, session_mgr)
+jobs_tools.register_tools(mcp, job_mgr)
 pdf_extractor.register_tools(mcp)
 
 

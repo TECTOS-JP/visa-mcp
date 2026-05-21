@@ -1,5 +1,83 @@
 # 変更履歴
 
+## v0.5.0-rc2 — Job 基盤 (state machine + SQLite + 5 MCP ツール)
+
+実験実行基盤 "Job MVP" の中核。Recipe を非同期 Job として登録・追跡・キャンセルできる。
+
+### 新規モジュール
+
+- **`visa_mcp.job`** ── Job 実行基盤
+  - `state_machine`: `JobStatus` (queued/running/waiting/completed/failed/cancelling/cancelled/timeout/interrupted) + `CancelMode` + 遷移ルール検証
+  - `store.JobStore`: SQLite 永続化 (スキーマ最小版: jobs テーブルのみ)
+  - `manager.JobManager`: バックグラウンド Job 実行 + キャンセル + interrupted 自動遷移
+
+### 新規 MCP ツール (5 個)
+
+| ツール | 用途 |
+|-------|------|
+| `start_recipe_job(resource, recipe, parameters, owner, override_safety, override_reason)` | recipe を Job 化、即 job_id 返却 |
+| `get_job_status(job_id)` | 状態 + current_step + 簡易サマリ |
+| `get_job_result(job_id)` | 完了/失敗/中断時の steps_executed を含む完全結果 |
+| `list_jobs(status_filter, owner, limit)` | Job 一覧 (新しい順、安定ソート) |
+| `cancel_job(job_id, cancel_mode, timeout_s)` | キャンセル要求 (immediate / after_current_step / safe_shutdown) |
+
+すべて v0.5.0+ の標準 envelope 形式 (response_envelope) で返す。
+
+### Job 状態機械
+
+```
+queued → running → waiting → completed
+                 → failed
+                 → cancelling → cancelled
+                 → timeout
+                 → interrupted (サーバ再起動)
+```
+
+### 再起動セマンティクス
+
+サーバ起動時、SQLite 上の `running` / `waiting` / `cancelling` Job を `interrupted` に遷移させる。
+LLM は `list_jobs` で過去ジョブの履歴と中断状態を確認可能 (自動復帰は v0.9.0 以降)。
+
+### CancelMode
+
+| モード | 動作 |
+|-------|------|
+| `immediate` | asyncio.Task を直ちにキャンセル (CancelledError) |
+| `after_current_step` | 現在の step 完了後 or wait 中断で停止 |
+| `safe_shutdown` | YAML/汎用安全停止 (set_output OFF, set_voltage 0) を実行してから停止 |
+
+WaitStep 実行中も 200ms 刻みで cancel チェック → 長い待機中も即時応答可能。
+
+### 永続化
+
+`~/.visa-mcp/state.sqlite` (環境変数 `VISA_MCP_STATE_DB` で変更可) に jobs テーブルを保持。
+WAL モード、スレッドセーフ。
+
+### テスト
+
+- 199 件全パス (rc1 の 149 件から +50 件)
+  - `test_job_state_machine.py` (25 件): 遷移ルール / Terminal/Active 判定 / CancelMode
+  - `test_job_store.py` (10 件): create/get/list/transition/update_step/mark_interrupted_on_startup
+  - `test_job_manager.py` (9 件): start/wait/cancel/list (モック VISA)
+- 実機検証 (PMX35-3A):
+  - 9-step recipe を Job として完走 (queued → waiting → completed)
+  - safe_shutdown による cancel で OUTP? = 0 を確認 (出力 OFF が走った)
+  - list_jobs で複数 Job の状態取得
+
+### 制約事項 (v0.5.0-rc2 時点)
+
+- SQLite スキーマは最小版 (jobs のみ)。`job_steps` / `measurement_cache` / `locks` / `monitor_data` は v0.7.0 で追加
+- `verify` / `state_query` / `describe_instrument` / `get_state` は v0.7.0
+- Group / Map / Bus 単位並列制御は v0.6.0
+- wait の polling 系 (`wait_for_condition` / `wait_for_stable`) は v0.5.1
+
+### 後方互換
+
+- 既存 17 ツール + recipe / safety / response_format / experiment_ir すべて変更なし
+- 既存テスト (149 件) もすべてパス
+
+---
+
 ## v0.5.0-rc1 — 内部 IR + wait step + 標準レスポンス形式
 
 実験実行基盤 (v0.5.0 "Job MVP") に向けた最初の rc。後方互換を維持しながら基礎レイヤーを導入する。

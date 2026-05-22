@@ -153,6 +153,28 @@
           "default": "",
           "title": "Category",
           "type": "string"
+        },
+        "support_level": {
+          "default": "draft",
+          "title": "Support Level",
+          "type": "string"
+        },
+        "tested_interfaces": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Tested Interfaces",
+          "type": "array"
+        },
+        "tested_firmware": {
+          "default": "",
+          "title": "Tested Firmware",
+          "type": "string"
+        },
+        "definition_version": {
+          "default": "",
+          "title": "Definition Version",
+          "type": "string"
         }
       },
       "required": [

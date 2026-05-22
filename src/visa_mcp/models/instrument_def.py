@@ -100,6 +100,17 @@ class MetadataConfig(BaseModel):
     description: str = ""
     manual_ref: str = ""
     category: str = ""                     # power_supply / multimeter / oscilloscope 等
+    # v0.9.2: ecosystem / registry 用品質メタ
+    # support_level: registry 掲載時の信頼度。
+    #   - verified:     実機で identify / command / state_query / verify /
+    #                   safe_shutdown を確認済み
+    #   - tested:       mock または実機で基本 command を確認済み
+    #   - experimental: マニュアル等から起こした初期定義
+    #   - draft:        未検証 (Plan 生成時に注意推奨)
+    support_level: str = "draft"
+    tested_interfaces: list[str] = Field(default_factory=list)  # ["USB", "LAN", "GPIB"]
+    tested_firmware: str = ""
+    definition_version: str = ""           # 機器定義 YAML 自体の改訂番号 (任意)
 
 
 # ===== 安全制約 (v0.2.0) =====

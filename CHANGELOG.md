@@ -1,5 +1,119 @@
 # 変更履歴
 
+## v0.9.2 — Ecosystem 準備 (Registry / Schema / CLI / 英語 docs)
+
+合言葉:「**実験実行能力を増やすのではなく、外部ユーザーや将来の AI エージェント
+が安全に使える定義・Schema・検証基盤を整える**」。新規 MCP ツールなし。
+新規 CLI subcommand 1 種 (`visa-mcp validate`)、機器定義 registry skeleton、
+`support_level` 導入、英語 docs 草案を追加。
+
+### 新規 CLI
+
+| コマンド | 用途 |
+|---------|------|
+| `visa-mcp validate instrument <path>` | 機器定義 YAML を schema + lint で検証 |
+| `visa-mcp validate system <path>` | `_system.yaml` を検証 |
+| `visa-mcp validate plan <path>` | DSL plan を ExperimentPlan として検証 |
+| `visa-mcp validate benchmark <path>` | benchmark task YAML を検証 |
+| `visa-mcp validate registry <path>` | `registry/INDEX.yaml` に列挙された全機器を一括検証 |
+| `visa-mcp validate schemas [<dir>]` | `schemas/*.schema.json` の pretty-print / LF only / preview metadata を確認 |
+
+各コマンドは `--json` で CI 向け machine-readable 出力。引数なしの
+`visa-mcp` 単体は従来通り MCP server 起動 (後方互換)。
+
+### 機器定義 Registry skeleton
+
+```
+registry/
+├── README.md
+├── INDEX.yaml          # 機器定義の一覧
+└── instruments/
+    └── mock/
+        ├── mock_psu.yaml   (support_level: tested)
+        ├── mock_dmm.yaml   (support_level: tested)
+        └── mock_temp.yaml  (support_level: tested)
+```
+
+`INDEX.yaml` の各 entry は `id` / `vendor` / `model` / `category` /
+`support_level` / `path` を持つ。
+
+### `support_level` 導入
+
+機器定義 `metadata.support_level` で品質を 4 段階に分類:
+
+| level | 条件 |
+|-------|------|
+| `verified` | 実機で identify / 主要 command / state_query / verify / safe_shutdown 確認済み |
+| `tested` | mock または実機で基本 command 確認済み |
+| `experimental` | マニュアル等から作成、限定的動作確認 |
+| `draft` | 未検証 (Plan 生成時に注意推奨) |
+
+既定値は `draft` (互換維持)。新規フィールド: `tested_interfaces` /
+`tested_firmware` / `definition_version`。
+
+### Instrument lint (warning level)
+
+`visa-mcp validate instrument <yaml>` で以下を warning として検出:
+
+- `missing_safe_shutdown` (write command を持つが safe_shutdown 未定義)
+- `missing_state_query` (state_query 未定義)
+- `missing_verify` (set 系 write command に verify 未定義)
+- `support_level_draft` (draft レベルの注意喚起)
+- `invalid_support_level` (4 段階以外の値)
+- `missing_metadata` (manufacturer/model 不足)
+- `registry_support_level_mismatch` (INDEX vs YAML の不一致)
+
+### JSON Schema 整理
+
+- **`schemas/benchmark_task.schema.json` 新規** 追加 (BenchmarkTask root + repair section)
+- 全 schema は `indent=2` pretty-print + LF only + `x-visa-mcp-status: preview` 必須
+- `visa-mcp validate schemas` で CI 向け自動チェック
+
+### 英語 docs 草案
+
+- **`docs/en/quickstart.md`** (60 秒インストール / Claude Desktop 登録 /
+  3 layer workflow / safety notes)
+- **`docs/en/concepts.md`** (Instrument definition / system_config /
+  ExperimentPlan / Job model / Benchmark task / Observation API /
+  error_class)
+
+### 新規ファイル
+
+| ファイル | 役割 |
+|---------|------|
+| `src/visa_mcp/registry.py` | registry + lint + validation helpers |
+| `src/visa_mcp/cli.py` | `visa-mcp validate` subcommand |
+| `registry/INDEX.yaml` + `registry/instruments/mock/*.yaml` | registry skeleton |
+| `docs/en/{quickstart,concepts}.md` | 英語 docs 草案 |
+
+### テスト
+
+- `tests/test_v092_ecosystem.py` 30 件 (schema files pretty-print / preview
+  metadata / benchmark_task schema generated / registry index loads /
+  entries point to existing files / registry definitions validate /
+  support_level required / default support_level=draft / accepts 4 levels /
+  lint missing safe_shutdown / lint missing verify / lint missing
+  state_query / lint draft warning / lint verified clean / CLI instrument
+  success / CLI failure exit=1 / CLI registry / CLI benchmark / CLI schemas /
+  english docs exist)
+- **合計 546 件 passing** (v0.9.1.1: 516 → v0.9.2: 546)
+
+### 互換性
+
+- `MetadataConfig` への新フィールドは optional / 既定値あり (既存 YAML 無変更で動作)
+- `pyproject.toml` entry point: `visa-mcp = "visa_mcp.cli:main"`。引数なし
+  実行は従来通り server 起動なので Claude Desktop 設定変更不要
+- Stable API 不変
+
+### スコープ外 (v0.9.3 以降)
+
+- audit SQLite 統合 + `query_audit` (v0.9.3)
+- multi-agent lock 完成 (v0.9.3)
+- LLM ベンチ CI / API 凍結 / 再現性 bundle (v1.0)
+- registry pull CLI / remote registry (v1.0+)
+
+---
+
 ## v0.9.1.1 — Self-repair / Export レビュー対応 (P0/P1)
 
 v0.9.1 外部レビュー P0/P1 対応。新規 MCP ツール無し、互換維持 (experimental

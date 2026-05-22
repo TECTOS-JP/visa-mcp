@@ -63,6 +63,19 @@ def main() -> int:
     )
     print("generated: schemas/instrument.schema.json")
 
+    # v0.9.2: BenchmarkTask schema を追加 (Ecosystem 準備)
+    from visa_mcp.testing.benchmark_task import BenchmarkTask
+    bench_schema = BenchmarkTask.model_json_schema()
+    _add_preview_metadata(
+        bench_schema, "benchmark_task",
+        "Benchmark Task (incl. repair tasks) (v0.9.2 preview)",
+    )
+    (SCHEMAS_DIR / "benchmark_task.schema.json").write_text(
+        json.dumps(bench_schema, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    print("generated: schemas/benchmark_task.schema.json")
+
     from visa_mcp.system_config import SystemConfig
     sysconf_schema = SystemConfig.model_json_schema()
     _add_preview_metadata(

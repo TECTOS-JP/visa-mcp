@@ -1,5 +1,96 @@
 # 変更履歴
 
+## v0.7.0.1 — 外部レビュー対応 (P0/P1)
+
+v0.7.0 公開後の外部レビューで指摘された P0 三件 + P1 二件への対応。
+critical event 永続化失敗の可視化、`get_last_measurement` の副作用回避、
+`monitor_data` の prune API 追加、verify の曖昧パターン拒否、`get_monitor_data`
+limit 上限。
+
+### P0
+
+- **critical event 永続化失敗を Job result.persistence_warnings に注入**
+  - 旧: `record_event` の DB 書き込み失敗は debug ログのみで握りつぶし。
+    実験安全に関わる `verify_failed` / `safe_shutdown_failed` / `step_failed` /
+    `job_failed` / `barrier_timeout` 等が記録できなくても Job 実行は継続するが、
+    あとから「記録できなかった事実」を追えなかった
+  - 新: `_CRITICAL_EVENT_TYPES` に登録された event の DB 書き込み失敗時、
+    runtime に保持し最終 Job result に `persistence_warnings: [{event_type,
+    target_id, step_index, error}, ...]` として注入。warn ログも出力
+  - Job 実行を止める設計ではなく、**可視化のみ** (実験は止めない)
+- **`get_last_measurement` の `refresh_if_stale: bool = False` 追加 (default 安全側)**
+  - 旧: cache が古い or なし の時、自動的に state_query の command を実行
+    (`polling_safe=False` の query を意図せず発動するリスク)
+  - 新 default 動作 (`refresh_if_stale=False`): cache 古い / なし なら
+    `value=None`, `stale=True` を返し、**実機 query を発生させない**。
+    `refresh_if_stale=True` を明示した場合のみ再取得
+  - LLM の意図しない副作用を防ぐ安全側変更
+- **`monitor_data` の prune / delete API + MCP ツール `prune_monitor_data`**
+  - `JobStore.delete_monitor_data(monitor_id)`: 指定 monitor の全データ削除
+  - `JobStore.prune_monitor_data(older_than_days)`: 古いデータ削除
+  - `JobStore.total_monitor_data_count()`: 運用監視用全行数
+  - MCP ツール `prune_monitor_data` 追加 (`monitor_id` 指定 or
+    `older_than_days` 指定の排他)。長期運用での DB 肥大化対策
+
+### P1
+
+- **verify で複数数値 args の場合 `arg_key` 必須化**
+  - 旧: `set_limit(voltage, current)` のような複数数値 args + `arg_key` 未指定
+    だと「最初の数値 args」を自動推定していた (dict 順序依存、曖昧)
+  - 新: 数値 args が 2 以上で `arg_key` 未指定の場合、verify を
+    `status=readback_failed` で拒否し、`arg_key` 明示を要求するメッセージ
+  - 単一数値 args なら従来通り自動推定 (後方互換)
+- **`get_monitor_data` の `limit` 上限 (10000) クランプ**
+  - 旧: 大きな `limit` でも全件返す可能性
+  - 新: `limit > 10000` は `10000` にクランプし、`clamp_warning` /
+    `has_more` / `limit_used` フィールドを返す。`offset` と組み合わせて
+    複数呼び出しで全件取得可能
+
+### docs
+
+- `get_last_measurement` の docstring に副作用注意 (refresh_if_stale=True
+  かつ `polling_safe=False` の command で意図せず実機 query する旨) を明記
+
+### 後回し (v0.7.1 以降)
+
+- `state_query.map` の数値変換境界 (`1.5` のような中間値) を明文化
+- `state_query` 全項目直列実行 → 並列化検討
+- `verify.on_failure` フィールド (fail_step / safe_shutdown / warning)
+- `JobStore` のモジュール分割 (event_store / history_store / measurement_store)
+- 文字列 verify
+- `locks` テーブル / audit SQLite 統合
+
+### 新規 MCP ツール (1 個、合計 31 → 32)
+
+| ツール | 用途 |
+|--------|------|
+| `prune_monitor_data` | Monitor data 削除 (monitor_id 指定 / older_than_days 指定) |
+
+### テスト (9 件追加、合計 322 passed)
+
+`tests/test_persistence_verify_v0701.py`:
+
+- `test_persistence_warnings_recorded_when_critical_event_fails`
+  (step_failed の DB 書き込み失敗が `result.persistence_warnings` に残る)
+- `test_get_last_measurement_no_implicit_refresh` (default で実機 query が
+  呼ばれない)
+- `test_get_last_measurement_refresh_if_stale_true`
+- `test_delete_monitor_data` / `test_prune_monitor_data_by_age`
+- `test_verify_rejects_ambiguous_multi_numeric_args`
+  (set_limit(voltage, current) + arg_key 未指定で reject)
+- `test_verify_accepts_explicit_arg_key_with_multi_args`
+- `test_verify_single_numeric_arg_auto_works`
+- `test_verify_readback_must_be_query`
+
+### 後方互換
+
+- `get_last_measurement` の default 動作が変わるため、v0.7.0 で
+  cache が古い場合に再取得を期待していた呼び出しは `refresh_if_stale=True`
+  を明示する必要がある (安全側変更)
+- 上記以外のすべての挙動 / 32 MCP ツール / YAML / SQLite schema は不変
+
+---
+
 ## v0.7.0 — Persistence + self-awareness + verify
 
 v0.5 / v0.6 系で固めた「動く」実装の上に、**追跡できる・検証できる・状態を

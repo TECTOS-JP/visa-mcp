@@ -120,16 +120,35 @@ def register_tools(mcp: FastMCP, job_mgr: JobManager) -> None:
             job_id=rec.job_id,
         )
 
+    # v0.7.0.1: limit 上限 (1 ツール呼び出しで返す最大行数)
+    _MAX_MONITOR_LIMIT = 10000
+
     @mcp.tool()
     async def get_monitor_data(
         monitor_id: str,
         limit: int = 1000,
         offset: int = 0,
     ) -> dict:
-        """Monitor Job の時系列測定データを取得 (新しい順ではなく時系列順)
+        """Monitor Job の時系列測定データを取得 (時系列順)
 
         get_job_result は monitor_data を含めないため、大量データはこちらで取る。
+
+        v0.7.0.1: limit は 1 〜 10000 に強制クランプ (上限を超える指定は警告込みで丸める)。
+        全件取得には offset を進めながら複数回呼ぶ。
         """
+        # validation
+        if limit <= 0:
+            limit = 1000
+        clamp_warning = None
+        if limit > _MAX_MONITOR_LIMIT:
+            clamp_warning = (
+                f"limit={limit} が上限 {_MAX_MONITOR_LIMIT} を超過したため "
+                f"{_MAX_MONITOR_LIMIT} にクランプしました。"
+                f"全件取得には offset を進めて複数回呼んでください"
+            )
+            limit = _MAX_MONITOR_LIMIT
+        if offset < 0:
+            offset = 0
         try:
             total = job_mgr.store.count_monitor_data(monitor_id)
             data = job_mgr.store.list_monitor_data(monitor_id, limit=limit, offset=offset)
@@ -138,10 +157,63 @@ def register_tools(mcp: FastMCP, job_mgr: JobManager) -> None:
                 "error",
                 errors=[make_error("internal", str(e))],
             )
-        return make_envelope("ok", data={
+        result_data = {
             "monitor_id": monitor_id,
             "total_samples": total,
             "returned": len(data),
+            "limit_used": limit,
             "offset": offset,
+            "has_more": (offset + len(data)) < total,
             "data": data,
-        })
+        }
+        if clamp_warning:
+            result_data["clamp_warning"] = clamp_warning
+        return make_envelope("ok", data=result_data)
+
+    @mcp.tool()
+    async def prune_monitor_data(
+        monitor_id: str = "",
+        older_than_days: float = 0.0,
+    ) -> dict:
+        """Monitor data を削除する (v0.7.0.1 新設、DB 肥大化対策)
+
+        monitor_id: 指定 monitor_id の全 data を削除 (older_than_days=0 と排他的に使う)
+        older_than_days: 指定日数より古い全 monitor_data を削除
+                         (monitor_id="" と組み合わせて全体 prune)
+
+        どちらか一方を指定すること。両方指定された場合は monitor_id が優先。
+        どちらも省略 (monitor_id="" かつ older_than_days=0) なら validation error。
+
+        運用例:
+          - 単一 monitor 削除: prune_monitor_data(monitor_id="job_abc123")
+          - 7 日以上前の全 data 削除: prune_monitor_data(older_than_days=7)
+        """
+        if not monitor_id and older_than_days <= 0:
+            return make_envelope(
+                "error",
+                errors=[make_error(
+                    "validation",
+                    "monitor_id または older_than_days のどちらかを指定してください",
+                    recoverable=False,
+                )],
+            )
+        try:
+            if monitor_id:
+                deleted = job_mgr.store.delete_monitor_data(monitor_id)
+                return make_envelope("ok", data={
+                    "monitor_id": monitor_id,
+                    "deleted_rows": deleted,
+                    "mode": "by_monitor_id",
+                })
+            else:
+                deleted = job_mgr.store.prune_monitor_data(older_than_days)
+                return make_envelope("ok", data={
+                    "older_than_days": older_than_days,
+                    "deleted_rows": deleted,
+                    "mode": "by_age",
+                })
+        except Exception as e:
+            return make_envelope(
+                "error",
+                errors=[make_error("internal", str(e))],
+            )

@@ -150,6 +150,21 @@ class JobManager:
 
     # ---------- public API ----------
 
+    # v0.7.0.1: critical event (失敗時に Job result に警告を残す対象)
+    _CRITICAL_EVENT_TYPES = frozenset({
+        "verify_failed",
+        "safe_shutdown_failed",
+        "safe_shutdown_started",
+        "safe_shutdown_completed",
+        "job_failed",
+        "job_cancelled",
+        "job_interrupted",
+        "job_timeout",
+        "barrier_timeout",
+        "target_failed",
+        "step_failed",
+    })
+
     def _safe_record_event(
         self,
         job_id: str,
@@ -159,7 +174,12 @@ class JobManager:
         step_index: int | None = None,
         payload: dict[str, Any] | None = None,
     ) -> None:
-        """job_events 記録のラッパー (例外を握りつぶす)"""
+        """job_events 記録のラッパー (例外を握りつぶす)。
+
+        v0.7.0.1: critical event の永続化失敗時は、runtime に
+        persistence_warnings として記録し、最終 Job result に含める
+        (実験安全・監査の観点で、書き込めなかった事実を必ず可視化する)。
+        """
         try:
             self._store.record_event(
                 job_id, event_type, target_id=target_id,
@@ -167,6 +187,30 @@ class JobManager:
             )
         except Exception as e:
             logger.debug("record_event 失敗 (event=%s): %s", event_type, e)
+            if event_type in self._CRITICAL_EVENT_TYPES:
+                # critical event は visibility 確保のため warn ログ + runtime 保持
+                logger.warning(
+                    "[persistence_warning] critical event '%s' の DB 書き込み失敗: %s",
+                    event_type, e,
+                )
+                rt = self._runtimes.get(job_id)
+                if rt is not None:
+                    if not hasattr(rt, "persistence_warnings"):
+                        rt.persistence_warnings = []  # type: ignore[attr-defined]
+                    rt.persistence_warnings.append({  # type: ignore[attr-defined]
+                        "event_type": event_type,
+                        "target_id": target_id,
+                        "step_index": step_index,
+                        "error": str(e),
+                    })
+
+    def _consume_persistence_warnings(self, job_id: str) -> list[dict] | None:
+        """runtime の persistence_warnings を取り出す (なければ None)"""
+        rt = self._runtimes.get(job_id)
+        if rt is None:
+            return None
+        w = getattr(rt, "persistence_warnings", None)
+        return list(w) if w else None
 
     async def start_recipe_job(
         self,
@@ -1791,11 +1835,14 @@ class JobManager:
                         current_step_index=idx,
                         error_class=err_class,
                         last_step_summary=f"step {idx} failed: {result.get('message', result.get('error', '?'))[:80]}",
-                        result={
-                            "success": False, "recipe": rec.recipe,
-                            "steps_executed": step_results,
-                            "halted_at_step": idx,
-                        },
+                        result=self._with_persistence_warnings(
+                            job_id,
+                            {
+                                "success": False, "recipe": rec.recipe,
+                                "steps_executed": step_results,
+                                "halted_at_step": idx,
+                            },
+                        ),
                     )
                     return
 
@@ -1812,15 +1859,17 @@ class JobManager:
                         return
 
             # 全 step 成功
+            _final_result = {
+                "success": True, "recipe": rec.recipe,
+                "steps_executed": step_results,
+                "step_count": len(step_results),
+            }
+            self._attach_persistence_warnings(job_id, _final_result)
             self._store.transition_status(
                 job_id, JobStatus.COMPLETED,
                 current_step_index=len(plan.steps) - 1,
                 last_step_summary="completed",
-                result={
-                    "success": True, "recipe": rec.recipe,
-                    "steps_executed": step_results,
-                    "step_count": len(step_results),
-                },
+                result=_final_result,
             )
 
         except asyncio.CancelledError:
@@ -1922,6 +1971,14 @@ class JobManager:
         if current and current.status not in (JobStatus.CANCELLING, JobStatus.CANCELLED):
             self._safe_transition(job_id, JobStatus.CANCELLING)
 
+        _cancel_result = {
+            "success": False, "recipe": rec.recipe,
+            "steps_executed": step_results,
+            "cancelled": True, "cancel_mode": mode.value,
+            # v0.5.0.4: safe_shutdown サマリを構造化付与
+            "safe_shutdown": shutdown_info if shutdown_info is not None else None,
+        }
+        self._attach_persistence_warnings(job_id, _cancel_result)
         self._store.transition_status(
             job_id, JobStatus.CANCELLED,
             error_class="cancelled",
@@ -1929,13 +1986,7 @@ class JobManager:
                 f"cancelled ({mode.value})"
                 + (f" shutdown_success={shutdown_info.get('success')}" if shutdown_info else "")
             ),
-            result={
-                "success": False, "recipe": rec.recipe,
-                "steps_executed": step_results,
-                "cancelled": True, "cancel_mode": mode.value,
-                # v0.5.0.4: safe_shutdown サマリを構造化付与
-                "safe_shutdown": shutdown_info if shutdown_info is not None else None,
-            },
+            result=_cancel_result,
         )
         return JobStatus.CANCELLED
 
@@ -1946,16 +1997,18 @@ class JobManager:
         step_results: list[dict],
     ) -> None:
         """job_timeout_s 経過時の TIMEOUT 終端遷移を記録"""
+        _result = {
+            "success": False, "recipe": rec.recipe,
+            "steps_executed": step_results,
+            "timed_out_at_step": step_idx,
+        }
+        self._attach_persistence_warnings(rec.job_id, _result)
         self._store.transition_status(
             rec.job_id, JobStatus.TIMEOUT,
             current_step_index=step_idx,
             error_class="timeout",
             last_step_summary=f"job_timeout_s exceeded at step {step_idx}",
-            result={
-                "success": False, "recipe": rec.recipe,
-                "steps_executed": step_results,
-                "timed_out_at_step": step_idx,
-            },
+            result=_result,
         )
 
     # safe_shutdown YAML が無いとき fallback を適用するカテゴリ (v0.5.0.4)
@@ -2120,6 +2173,25 @@ class JobManager:
             "success": all_ok,
             "steps": steps_result,
         }
+
+    def _attach_persistence_warnings(self, job_id: str, result: dict) -> None:
+        """v0.7.0.1: critical event 永続化失敗を Job result に注入する。
+
+        result dict をその場で mutate して `persistence_warnings` キーを追加
+        (空ならキー自体を追加しない)。
+        """
+        if not isinstance(result, dict):
+            return
+        warnings = self._consume_persistence_warnings(job_id)
+        if warnings:
+            result["persistence_warnings"] = warnings
+
+    def _with_persistence_warnings(self, job_id: str, result: dict) -> dict:
+        """`_attach_persistence_warnings` の immutable 風ヘルパ。
+        result を mutate して返す (新規 dict は作らない、軽量化のため)。
+        """
+        self._attach_persistence_warnings(job_id, result)
+        return result
 
     @staticmethod
     def _poll_cancel_reason(runtime: "_JobRuntime") -> str | None:

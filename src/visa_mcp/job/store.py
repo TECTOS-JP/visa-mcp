@@ -756,6 +756,38 @@ class JobStore:
         ).fetchone()
         return int(row["n"]) if row else 0
 
+    # --- v0.7.0.1: monitor_data prune / delete ---
+
+    def delete_monitor_data(self, monitor_id: str) -> int:
+        """指定 monitor_id の全 monitor_data を削除。返り値 = 削除行数"""
+        with self._write_lock:
+            cur = self._connect().execute(
+                "DELETE FROM monitor_data WHERE monitor_id=?", (monitor_id,),
+            )
+            return cur.rowcount or 0
+
+    def prune_monitor_data(self, older_than_days: float) -> int:
+        """older_than_days 日より古い monitor_data 行を削除。返り値 = 削除行数
+
+        timestamp は ISO8601 文字列で保存されているため、SQLite 上で datetime() 比較。
+        """
+        from datetime import datetime, timezone, timedelta
+        cutoff = (datetime.now(timezone.utc)
+                  - timedelta(days=float(older_than_days)))
+        cutoff_iso = cutoff.isoformat(timespec="seconds")
+        with self._write_lock:
+            cur = self._connect().execute(
+                "DELETE FROM monitor_data WHERE timestamp < ?", (cutoff_iso,),
+            )
+            return cur.rowcount or 0
+
+    def total_monitor_data_count(self) -> int:
+        """全 monitor_data の総行数 (運用監視用)"""
+        row = self._connect().execute(
+            "SELECT COUNT(*) AS n FROM monitor_data",
+        ).fetchone()
+        return int(row["n"]) if row else 0
+
     def close(self) -> None:
         conn = getattr(self._local, "conn", None)
         if conn is not None:

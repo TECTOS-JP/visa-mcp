@@ -316,15 +316,25 @@ def register_tools(
         instrument: str,
         measurement: str,
         max_age_s: float = 60.0,
+        refresh_if_stale: bool = False,
     ) -> dict:
-        """測定値キャッシュから最新値を取得 (v0.7.0)
+        """測定値キャッシュから最新値を取得 (v0.7.0 / v0.7.0.1)
 
-        cache が無い、または age > max_age_s なら、state_query 定義に従って
-        実機 query して cache 更新後の値を返す。
+        **v0.7.0.1 動作変更 (重要)**:
+        - default は `refresh_if_stale=False`: cache が古ければ value=None +
+          stale=True を返し、**実機 query を発生させない** (副作用回避の安全側)
+        - `refresh_if_stale=True` を明示すると、cache が古い場合に state_query
+          定義の command を実行して値を取得する (副作用ある query では注意)
 
-        instrument: VISA resource 名
+        instrument: VISA resource 名 / alias
         measurement: state_query のキー名 (例: "voltage")
         max_age_s: cache 受容年齢 (s)
+        refresh_if_stale: True なら age > max_age_s 時に実機 query で再取得。
+                          False (default) なら value=None で返す。
+
+        副作用注意: refresh_if_stale=True かつ state_query の command が
+        polling_safe=False の場合、意図せず実機を駆動する。LLM は明示的に
+        意図がある場合のみ True を指定すること。
         """
         store = job_mgr.store if job_mgr is not None else None
         if store is None:
@@ -360,7 +370,30 @@ def register_tools(
             except Exception:
                 pass
 
-        # cache 古い or なし → state_query から再取得
+        # cache 古い or なし
+        # v0.7.0.1: refresh_if_stale=False なら実機 query を発生させない (安全側)
+        if not refresh_if_stale:
+            return make_envelope(
+                "ok",
+                data={
+                    "instrument": instrument,
+                    "measurement": measurement,
+                    "value": None,
+                    "stale": True,
+                    "cached": cached is not None,
+                    "cached_age_s": (
+                        round((datetime.now(timezone.utc)
+                               - datetime.fromisoformat(cached["timestamp"])).total_seconds(), 3)
+                        if cached else None
+                    ),
+                    "note": (
+                        "cache が古いまたは存在しないため None を返却。"
+                        "実機から再取得するには refresh_if_stale=True を指定してください"
+                    ),
+                },
+            )
+
+        # refresh_if_stale=True → state_query から再取得
         item = session.definition.state_query.get(measurement)
         if item is None:
             return make_envelope(

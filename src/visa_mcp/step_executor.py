@@ -220,20 +220,64 @@ async def _do_verify(
     """
     from .response_parser import parse_response
 
-    # expected: arg_key 指定 or 最初の数値 args を採用
-    expected: float | None = None
-    if verify_cfg.arg_key and verify_cfg.arg_key in resolved_args:
+    # v0.7.0.1: 期待値推定を厳密化
+    # 数値 args が複数ある場合は arg_key を必須にする (set_limit(voltage, current)
+    # のような曖昧パターンを reject)。
+    numeric_args: list[tuple[str, float]] = []
+    for k, v in resolved_args.items():
         try:
-            expected = float(resolved_args[verify_cfg.arg_key])
+            numeric_args.append((k, float(v)))
         except (TypeError, ValueError):
-            pass
-    if expected is None:
-        for v in resolved_args.values():
+            continue
+
+    expected: float | None = None
+    if verify_cfg.arg_key:
+        # 明示指定があればそれを採用
+        if verify_cfg.arg_key in resolved_args:
             try:
-                expected = float(v)
-                break
+                expected = float(resolved_args[verify_cfg.arg_key])
             except (TypeError, ValueError):
-                pass
+                return {
+                    "verified": False,
+                    "readback_command": verify_cfg.readback_command,
+                    "expected": None, "actual": None,
+                    "tolerance": verify_cfg.tolerance,
+                    "attempts": 0, "status": "readback_failed",
+                    "message": (
+                        f"verify.arg_key='{verify_cfg.arg_key}' の値が "
+                        f"数値ではありません: {resolved_args[verify_cfg.arg_key]!r}"
+                    ),
+                }
+        else:
+            return {
+                "verified": False,
+                "readback_command": verify_cfg.readback_command,
+                "expected": None, "actual": None,
+                "tolerance": verify_cfg.tolerance,
+                "attempts": 0, "status": "readback_failed",
+                "message": (
+                    f"verify.arg_key='{verify_cfg.arg_key}' が "
+                    f"resolved_args={list(resolved_args)} に存在しません"
+                ),
+            }
+    else:
+        # arg_key 未指定 → 数値 args の数に応じて分岐
+        if len(numeric_args) == 1:
+            expected = numeric_args[0][1]
+        elif len(numeric_args) >= 2:
+            return {
+                "verified": False,
+                "readback_command": verify_cfg.readback_command,
+                "expected": None, "actual": None,
+                "tolerance": verify_cfg.tolerance,
+                "attempts": 0, "status": "readback_failed",
+                "message": (
+                    f"verify: write '{write_step.command}' に数値 parameter が "
+                    f"複数あります ({[k for k, _ in numeric_args]})。"
+                    f"verify.arg_key を明示してください"
+                ),
+            }
+        # len == 0 の場合は expected=None のまま (info のみ verify になる)
 
     rb_cmd_def = session.definition.commands.get(verify_cfg.readback_command)
     if rb_cmd_def is None:

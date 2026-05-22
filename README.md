@@ -70,7 +70,7 @@ Claude に話しかける：
 >
 > 「USB0::0x... を identify_instrument で識別して、5V 出力するように設定してください」
 
-## 提供される MCP ツール（31 個 / raw 系は別途オプトイン）
+## 提供される MCP ツール（32 個 / raw 系は別途オプトイン）
 
 ### 識別・情報
 
@@ -125,7 +125,8 @@ Claude に話しかける：
 | `get_last_measurement` | 測定値キャッシュから最新値 (古ければ自動再取得) |
 | `start_monitor` | 機器を定期測定する Monitor Job を起動 (`monitor_data` に保存) |
 | `stop_monitor` | Monitor Job を停止 |
-| `get_monitor_data` | Monitor の時系列データを取得 (大量データ向け別ツール) |
+| `get_monitor_data` | Monitor の時系列データを取得 (大量データ向け別ツール、limit≤10000) |
+| `prune_monitor_data` | Monitor Job データを削除 (monitor_id 指定 / older_than_days 指定) ★v0.7.0.1 |
 
 ### 取り込み
 

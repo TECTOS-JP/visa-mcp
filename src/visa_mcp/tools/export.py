@@ -70,6 +70,13 @@ def _safe_export_path(
                 ),
                 "recoverable": True,
                 "details": {"existing_path": str(default_path)},
+                # v0.9.1.1: recommended_next_actions (レビュー指摘 P1)
+                "recommended_next_actions": [
+                    {"action": "set_overwrite_true",
+                     "reason": "前回の export を意図的に上書きする"},
+                    {"action": "choose_different_output_path",
+                     "reason": "別 path を指定して前回の export を保持する"},
+                ],
             })
         return (default_path, None)
 
@@ -110,6 +117,12 @@ def _safe_export_path(
             ),
             "recoverable": True,
             "details": {"existing_path": str(resolved)},
+            "recommended_next_actions": [
+                {"action": "set_overwrite_true",
+                 "reason": "前回の export を意図的に上書きする"},
+                {"action": "choose_different_output_path",
+                 "reason": "別 path を指定して前回の export を保持する"},
+            ],
         })
     return (resolved, None)
 
@@ -323,13 +336,21 @@ def register_tools(mcp: FastMCP, job_mgr: JobManager) -> None:
             )
 
         if format not in ("csv", "jsonl"):
+            # v0.9.1.1: sub_class から独立 error_class に昇格 (レビュー指摘 P1)
             return make_envelope(
                 "error",
                 errors=[make_error(
-                    "validation",
-                    f"unsupported_export_format: {format!r} (csv/jsonl のみ対応)",
+                    "unsupported_export_format",
+                    f"unsupported export format: {format!r} (csv/jsonl のみ対応)",
                     recoverable=True,
-                    details={"sub_class": "unsupported_export_format"},
+                    details={"requested_format": format,
+                             "supported_formats": ["csv", "jsonl"]},
+                    recommended_next_actions=[
+                        {"action": "use_csv_format",
+                         "reason": "format='csv' で再試行"},
+                        {"action": "use_jsonl_format",
+                         "reason": "format='jsonl' で再試行"},
+                    ],
                 )],
             )
 
@@ -345,6 +366,8 @@ def register_tools(mcp: FastMCP, job_mgr: JobManager) -> None:
                     err["error_class"], err["message"],
                     recoverable=err.get("recoverable", True),
                     details=err.get("details"),
+                    recommended_next_actions=err.get(
+                        "recommended_next_actions"),
                 )],
             )
         assert path is not None

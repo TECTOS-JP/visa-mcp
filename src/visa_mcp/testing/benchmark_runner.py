@@ -218,10 +218,18 @@ class BenchmarkRunner:
 
         ef = task.expected_failure
         if ef.phase == "validate":
-            # broken_plan は invalid であるべき
-            _add(result, "broken_plan_fails_at_validate",
-                 not broken.valid,
-                 f"valid={broken.valid}")
+            # v0.9.1.1: error_class が明示されていない場合は「broken_plan は
+            # validate 段階では valid のまま、後段 (execute/runtime) で失敗する」
+            # ことを許容する (repair_006 等の partial_failure シナリオ用)
+            if ef.error_class is None:
+                _add(result, "broken_plan_validates_for_runtime_failure",
+                     broken.valid,
+                     f"valid={broken.valid} (runtime 失敗を想定)")
+            else:
+                # broken_plan は invalid であるべき
+                _add(result, "broken_plan_fails_at_validate",
+                     not broken.valid,
+                     f"valid={broken.valid}")
             if ef.error_class:
                 classes = [e.get("error_class") for e in broken.errors]
                 _add(result, "broken_plan_has_expected_error_class",

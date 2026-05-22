@@ -1,5 +1,60 @@
 # 変更履歴
 
+## v0.9.1.1 — Self-repair / Export レビュー対応 (P0/P1)
+
+v0.9.1 外部レビュー P0/P1 対応。新規 MCP ツール無し、互換維持 (experimental
+スコープ内の整理)。
+
+### P0 確認
+
+- raw 改行: 該当ファイル (`benchmark_task.py` / `benchmark_runner.py` /
+  `export.py` / `tests/test_v091_repair_export.py` / repair task YAML 各種 /
+  `error_taxonomy.md`) すべて **LF only / CR=0 / 多行** で正常確認。
+
+### P1 改修
+
+- **`docs/benchmark_repair.md`** 新規追加: repair task の目的、broken_plan /
+  expected_failure / repaired_plan / expected_repair セクションの意味、
+  must_not の使い方、新規 task の追加手順、v1.0 までのスコープ外を整理。
+- **`docs/result_export.md`** 新規追加: `get_experiment_results` ↔
+  `export_experiment_results` の使い分け、`get_job_summary` /
+  `get_job_result` / `get_monitor_data` との関係、抽出元 (job_steps /
+  target_runs / monitor_data) を明示、安全策 (default dir / traversal 拒否 /
+  overwrite)、sha256、error_class 一覧を整理。
+- **`repair_006_partial_failure_retry`** 新規 fixture: 2 branch parallel の
+  片方 timeout シナリオに対し「失敗 target だけを除外した repaired_plan」を
+  正解とする。must_not で `rerun_all_targets_unnecessarily` /
+  `ignore_failed_targets` / `mark_partial_failure_as_total_success` を禁止。
+  benchmark_runner は expected_failure.error_class=None のとき
+  「broken_plan は validate を通り runtime で失敗する」シナリオを許容。
+- **`unsupported_export_format` を独立 error_class に昇格** (sub_class 廃止):
+  `response_envelope.ErrorClass` Literal にも追加。AI エージェントが直接
+  分岐しやすくする。同時に `invalid_export_path` / `export_failed` /
+  `resume_not_allowed` も Literal に正式追加。
+- **`invalid_export_path` に `recommended_next_actions`**:
+  `set_overwrite_true` / `choose_different_output_path` を返却。既存ファイル
+  拒否時の AI 修正経路を明示。
+- **`unsupported_export_format` に `recommended_next_actions`**:
+  `use_csv_format` / `use_jsonl_format` を返却。
+
+### テスト
+
+- `tests/test_v0911_review.py` 6 件 (docs 存在 / repair_006 pass /
+  unsupported_export_format independent class / invalid_export_path
+  recommended actions / traversal recommended actions)
+- 既存 `test_export_unsupported_format` を独立 error_class 期待に更新
+- **合計 516 件 passing** (v0.9.1: 510 → v0.9.1.1: 516)
+
+### 互換性
+
+- `response_envelope.ErrorClass` Literal への追加は **純粋追加** (既存値は
+  そのまま)。
+- `unsupported_export_format` を sub_class から独立 error_class へ変更したが、
+  experimental スコープなので即時反映。
+- Stable API 不変。
+
+---
+
 ## v0.9.1 — Agent self-repair 評価 + 測定結果 export API
 
 合言葉:「**AI に修正させる前に、修正すべき失敗を定義する**」。v0.9.0 で作った

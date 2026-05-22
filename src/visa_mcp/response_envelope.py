@@ -24,6 +24,12 @@ ErrorClass = Literal[
     "not_found",
     "blocked",
     "internal",
+    # v0.9.1.1: export 系を独立 error_class へ昇格
+    "invalid_export_path",
+    "export_failed",
+    "unsupported_export_format",
+    # v0.9.0: resume_job (将来 error_class taxonomy 拡張時に正式化)
+    "resume_not_allowed",
 ]
 
 

@@ -412,10 +412,9 @@ async def test_export_unsupported_format(tmp_path, monkeypatch):
         out = res.structured_content or {}
         assert out.get("status") == "error"
         errs = out.get("errors") or []
+        # v0.9.1.1: 独立 error_class へ昇格
         assert any(
-            (e.get("details") or {}).get("sub_class")
-            == "unsupported_export_format"
-            for e in errs
+            e.get("error_class") == "unsupported_export_format" for e in errs
         )
     finally:
         store.close()

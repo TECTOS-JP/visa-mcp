@@ -1,5 +1,68 @@
 # 変更履歴
 
+## v0.8.1.1 — 外部レビュー対応 (P0/P1)
+
+v0.8.1 公開後の外部レビューで指摘された P0 一件 + P1 三件への対応。
+最重要は **`safe_shutdown.targets` 省略時の実行動作が summary と一致していなかった
+不整合の修正**。
+
+### P0
+
+- **`safe_shutdown.targets` 省略時、実行側で `used_resources` 全件 shutdown**
+  - 旧 v0.8.1: dry-run summary 上は `safe_shutdown_scope = "all_used_resources"` /
+    `safe_shutdown_targets = [psu1, psu2, ...]` と読めるが、実行側は
+    `required_resources[0]` の **1 台のみ** shutdown する暫定動作だった
+  - 新: `compiled.safe_shutdown_targets is None and compiled.has_safe_shutdown`
+    の場合に `compiled.used_resources` 全件に対して個別に
+    `_best_effort_safe_shutdown` を実行
+  - `safe_shutdown` 結果に `source="all_used_resources"`, 解決済み `targets[]`,
+    `per_resource[]` を含める (明示 `targets` 時の構造と完全に一致)
+  - **summary / rendered_steps / 実行時 result の 4 者一致** が保証される
+
+### P1
+
+- **`dry_run_plan` の errors[] で `recommended_next_actions` を top-level に**
+  - 旧: `validate_experiment_plan` は top-level に渡していたが `dry_run_plan` は
+    details に埋もれていた (AI エージェントから見て一貫性が崩れていた)
+  - 新: `make_error(...)` 呼び出しに `recommended_next_actions=e.get("recommended_next_actions")`
+    を明示渡し、details からは除外
+- **polling 系 (`wait_for_condition` / `wait_for_stable`) の rendered_steps に
+  `instrument_ref` / `args_raw` を保持**
+  - 旧: 内部 query の `_validate_command` 呼び出しで `instrument_ref` / `args_raw`
+    が渡されておらず、polling 系の rendered_steps では元 DSL の `$ref` が消えていた
+  - 新: command/query と同様に `instrument_ref=s.instrument` /
+    `args_raw=dict(s.args)` を渡す
+- **`safe_shutdown` rendered step に `step_path` 追加**
+  - 旧: `path` のみで、他 step 型と一貫性がなかった
+  - 新: `step_path` を併記 (Observation API / Timeline で活用)
+
+### 改行コード確認 (P2)
+
+- ローカルファイル: 全 `.py` / `README.md` が LF only / CR=0 で正常
+- GitHub raw 表示問題は外部キャッシュ起因 (実体は問題なし)
+
+### テスト (6 件追加、合計 375 passed)
+
+`tests/test_dsl_v0811.py`:
+
+- `test_safe_shutdown_omitted_targets_shutdowns_all_used_resources`
+  (**P0 必須**: 3 resource すべてが per_resource に含まれる)
+- `test_safe_shutdown_omitted_targets_matches_summary_targets`
+  (**P0 必須**: dry-run summary == used_resources == 実行時 targets の 3 者一致)
+- `test_dry_run_plan_errors_have_top_level_recommended_next_actions`
+- `test_wait_for_stable_rendered_includes_instrument_ref_and_args_raw`
+- `test_wait_for_condition_rendered_includes_instrument_ref_and_args_raw`
+- `test_safe_shutdown_rendered_step_includes_step_path`
+
+### 後方互換
+
+- 既存 38 MCP ツール / v0.8.1 DSL schema / SQLite DB はすべて不変
+- 動作変更は **`safe_shutdown.targets` 省略時の挙動のみ** (1 台 → 全 used_resources)
+- これは v0.8.1 の dry-run summary が示していた挙動への "整合化" であり、
+  実害のある破壊的変更ではない (旧動作に依存していたユーザーは想定なし)
+
+---
+
 ## v0.8.1 — DSL 安定化
 
 v0.8.0 系 DSL を後続 (Observation / Benchmark / Export / Reproducibility) の

@@ -121,14 +121,18 @@ def register_tools(
         rendered_steps = compiled.rendered_steps
 
         envelope_status = "ok" if compiled.valid else "error"
+        # v0.8.1.1: validate_experiment_plan と同じく、recommended_next_actions を
+        # top-level 引数で渡し、details に埋もれさせない (AI エージェント可読性)
         envelope_errors = (
             [
                 make_error(
                     e.get("error_class", "validation"),
                     e.get("message", "?"),
                     recoverable=True,
+                    recommended_next_actions=e.get("recommended_next_actions"),
                     details={k: v for k, v in e.items()
-                             if k not in ("error_class", "message")},
+                             if k not in ("error_class", "message",
+                                          "recommended_next_actions")},
                 )
                 for e in compiled.errors
             ]

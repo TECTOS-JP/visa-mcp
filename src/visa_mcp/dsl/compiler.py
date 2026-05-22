@@ -479,6 +479,8 @@ def _convert_step(
         _validate_command(
             ctx, session, s.command, _expand_args(s.args),
             step_index, expect_type="query",
+            instrument_ref=s.instrument,    # v0.8.1.1: polling 系も $ref / args_raw を保持
+            args_raw=dict(s.args),
         )
         ctx.estimated_duration_s += min(float(s.timeout_s), 30.0)  # 推定上限 30s
         if resource is None:
@@ -503,6 +505,8 @@ def _convert_step(
         _validate_command(
             ctx, session, s.command, _expand_args(s.args),
             step_index, expect_type="query",
+            instrument_ref=s.instrument,
+            args_raw=dict(s.args),
         )
         ctx.estimated_duration_s += min(float(s.timeout_s), 30.0)
         if resource is None:
@@ -569,9 +573,11 @@ def _convert_step(
                 )
         # IR 上には残さない (Job 終端で JobManager が _best_effort_safe_shutdown を実行)
         # 但し dry_run の rendered 表示用に rendered_steps へ追加
+        # v0.8.1.1: step_path を追加 (他の rendered_steps と一貫性)
         ctx.rendered_steps.append({
             "step_index": step_index,
-            "path": ctx.path,
+            "step_path": ctx.path,
+            "path": ctx.path,                # backward compat
             "step_type": "safe_shutdown",
             "targets": (
                 resolved_targets if resolved_targets is not None

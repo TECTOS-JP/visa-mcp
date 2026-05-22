@@ -1,5 +1,145 @@
 # 変更履歴
 
+## v0.8.1 — DSL 安定化
+
+v0.8.0 系 DSL を後続 (Observation / Benchmark / Export / Reproducibility) の
+**土台として信用できる状態**にするリリース。新機能追加ではなく、解釈・dry-run・
+実行結果の **一致性を潰す** ことに集中。実装方針 (visa_mcp_v0.8.1の実装方針.md) の
+合言葉:「DSL を増やすのではなく、DSL の解釈を信用できるものにする」。
+
+### P0: rendered_steps 構造強化 (LLM 可読性)
+
+`CompiledPlan.rendered_steps` の各エントリに以下を追加:
+
+| キー | 内容 |
+|------|------|
+| `step_path` | 階層構造内位置 (例: `steps[0].sweep[1].body[2]`) |
+| `instrument_ref` | 元 DSL の参照 (`$psu` 等) |
+| `resolved_resource` | 解決後 resource (`psu001`) |
+| `args_raw` | テンプレ展開前 (例: `{"voltage": "{voltage}"}`) |
+| `args_resolved` | 展開後 (例: `{"voltage": 3.0}`) |
+| `command_type` | `"write"` / `"query"` |
+| `rendered` | rendered_scpi の alias |
+| `safety.mode` | 検証時の safety_mode |
+| `verify.retry` | retry 回数 |
+
+LLM が「どの DSL 行を直すか」を判断しやすくなる。既存 `path` / `instrument` /
+`args` / `rendered_scpi` キーは後方互換で残す。
+
+### P0: warnings / errors の位置情報強化
+
+`_Context.add_error` / `add_warning` を拡張:
+
+```python
+{
+  "error_class": "unknown_command",
+  "message": "...",
+  "step_path": "steps[3]",        # 新: 階層構造位置
+  "field_path": "steps[3].targets", # 新: 該当フィールド
+  "step_index": 3,
+  "recommended_next_actions": [...] # 新: warnings にも対応
+}
+```
+
+`safe_shutdown_targets_empty` / `parallel_inside_sweep` / `nested_parallel` /
+`expanded_too_large` 等の各エラーに `recommended_next_actions` を付与。
+
+### P0: safe_shutdown semantics 強化
+
+- **`targets=[]` (空配列) を validation error**: 曖昧 (「全対象」「何もしない」の
+  どちらか不明) なため reject、`recommended_next_actions` で
+  「全対象なら targets を省略」「何もしないなら step ごと削除」を提示
+- **`CompiledPlan.used_resources` を新フィールドとして導入**: Plan で使用された
+  全 resource (parallel branches 含む完全集合) を別途保持。
+  `safe_shutdown_targets` (= shutdown 対象) と概念上区別
+- **`summary.safe_shutdown_scope`** = `"explicit"` (`targets` 指定あり) /
+  `"all_used_resources"` (`targets` 省略 + safe_shutdown あり) / `"none"`
+- **`summary.safe_shutdown_targets`**: scope に応じて解決済み resource list を
+  必ず返す (実行時の動作を summary から完全予測可能に)
+
+### P0: parallel 追加 validation
+
+v0.8.0.1 で導入した「top-level 末尾 1 回のみ」に加え:
+
+- **nested parallel 禁止** (`parallel.branches` 内の parallel を reject、
+  `error_class="nested_parallel"`)
+- **sweep 内 parallel 禁止** (`sweep.body` 内の parallel を reject、
+  `error_class="parallel_inside_sweep"`、v1.x で再検討予定)
+- **共有 resource warning** (`parallel.branches[i]` と `branches[k]` が同じ
+  resource を使うと `parallel_shared_resource` warning、`merge_branches` /
+  `use_distinct_resources` の recommended_next_actions を提示)
+
+`parallel_groups[*].branch_resources` フィールドに各 branch の使用 resource list を保持。
+
+### DSL examples (5 件、`docs/dsl/examples/`)
+
+各 example は `plan.json` + `expected_dry_run.json` + `README.md` の構成。
+LLM が「どの tool で使うか / 必要な bindings / 期待動作 / 失敗時の error_class」を
+読みやすい形式:
+
+1. `basic_voltage_set_and_measure` (command + query の最小例)
+2. `voltage_sweep_with_wait` (sweep + wait + query)
+3. `voltage_sweep_with_wait_for_stable` (sweep + 安定待ち)
+4. `partial_failure_group_measurement` (parallel 3 branch)
+5. `safe_shutdown_explicit_targets` (`targets` 明示指定)
+
+将来 v0.9.0 の benchmark seed として再利用予定。
+
+### JSON Schema preview 生成 (`schemas/*.schema.json`)
+
+`scripts/generate_schemas.py` を新設、Pydantic モデルから自動生成:
+
+- `schemas/dsl.schema.json` (ExperimentPlan)
+- `schemas/instrument.schema.json` (InstrumentDefinition)
+- `schemas/system_config.schema.json` (SystemConfig)
+
+各 schema に preview status を付与:
+
+```json
+{
+  "$id": "https://tectos-jp.github.io/visa-mcp/schemas/dsl.schema.preview.json",
+  "x-visa-mcp-status": "preview",
+  "x-compatibility": "subject-to-change-before-v1.0"
+}
+```
+
+v1.0 で正式公開。preview 段階では VS Code 補完等の参考用途に限定する旨を明記。
+
+### テスト (18 件追加、合計 369 passed)
+
+`tests/test_dsl_v081.py`:
+
+**実装方針必須 3 件**:
+- `test_dry_run_uses_compiled_rendered_steps_without_recompile` (CompiledPlan
+  から取得、再 compile 不要)
+- `test_safe_shutdown_targets_match_execution_targets` (DSL ↔ CompiledPlan ↔
+  rendered_steps ↔ 実行時 result の **4 者一致**)
+- `test_parallel_only_allowed_at_top_level_tail` (v0.8.0.1 互換確認)
+
+その他:
+- `test_rendered_steps_include_step_path_and_resolved_args`
+- `test_rendered_steps_include_safety_and_verify_summary`
+- `test_warning_contains_field_path_and_recommended_next_actions`
+- `test_safe_shutdown_empty_targets_rejected`
+- `test_safe_shutdown_targets_default_all_used_resources`
+- `test_used_resources_field_present`
+- `test_nested_parallel_rejected`
+- `test_parallel_inside_sweep_rejected`
+- `test_parallel_shared_resource_warns`
+- `test_dsl_examples_parse_as_schema` (5 examples が schema を通る)
+- `test_schema_files_generated`
+
+### 後方互換
+
+既存 38 MCP ツール / v0.8.0.1 DSL schema / SQLite DB はすべて不変。
+rendered_steps の旧キー (`path` / `instrument` / `args` / `rendered_scpi`) は維持。
+新規追加は CompiledPlan の `used_resources` フィールド + 各 dict のキー追加のみ。
+
+破壊的変更は `safe_shutdown.targets=[]` の reject のみ (v0.8.0 でも実害なく
+ignored 同等扱いだったため、影響範囲は限定的)。
+
+---
+
 ## v0.8.0.1 — 外部レビュー対応 (P0/P1)
 
 v0.8.0 公開後の外部レビューで指摘された P0 三件 + P1 二件への対応。

@@ -58,14 +58,16 @@ class CompiledPlan:
     # safe_shutdown ステップが含まれていたか
     has_safe_shutdown: bool = False
     # v0.8.0.1: safe_shutdown.targets が明示指定された場合の対象 resource リスト
-    # None なら "Plan で使用した全 resource" (= main_plan.required_resources)
+    # None なら "Plan で使用した全 resource" (= used_resources)
     safe_shutdown_targets: list[str] | None = None
     # 解決済み bindings (alias → resource_name)
     resolved_instruments: dict[str, str] = field(default_factory=dict)
     # v0.8.0.1: dry_run 用 rendered SCPI / safety / verify 情報
-    # 旧 v0.8.0 では _Context に蓄積されていたが、外部 (tools/dsl.py) から
-    # private helper で再 compile していたため正式フィールド化
     rendered_steps: list[dict] = field(default_factory=list)
+    # v0.8.1: 「Plan 内で参照された全 resource」と「scheduler が lock する resource」を分離
+    # required_resources (= main_plan.required_resources) は scheduler 投入用 (parallel branches は別 Job 経路を辿るため、main_plan のみの収集)
+    # used_resources は dry-run / safe_shutdown のスコープ表示用 (parallel branches も含む完全な使用 resource 集合)
+    used_resources: list[str] = field(default_factory=list)
 
 
 # ============================================================
@@ -106,6 +108,10 @@ class _Context:
         self.parallel_groups: list[dict] = []
         # validation-only mode?
         self.dry: bool = False
+        # v0.8.1: parallel branch ごとの使用 resource 収集用。
+        # parallel walk 中だけ set を入れ、終わったら None に戻す。
+        # _resolve_instrument は None でなければここにも追加する。
+        self._branch_resources: set[str] | None = None
         # rendered SCPI (dry_run 用)
         self.rendered_steps: list[dict] = []
         # 上限カウント
@@ -114,27 +120,49 @@ class _Context:
     def add_error(
         self, error_class: str, message: str,
         step_index: int | None = None,
+        field_path: str | None = None,
         recommended_next_actions: list[dict] | None = None,
         **extra,
     ) -> None:
+        """v0.8.1: step_path + field_path + recommended_next_actions を強化。
+        AI エージェントが「どこを / なぜ / どう直すか」を判断しやすくする。
+        """
         e: dict[str, Any] = {
             "error_class": error_class,
             "message": message,
-            "path": self.path,
+            "step_path": self.path,    # v0.8.1: 階層構造内 step 位置
         }
         if step_index is not None:
             e["step_index"] = step_index
+        if field_path:
+            e["field_path"] = field_path
         if recommended_next_actions:
             e["recommended_next_actions"] = recommended_next_actions
+        # backward compat: "path" キーも残す (v0.8.0 までのテスト互換)
+        e["path"] = self.path
         e.update(extra)
         self.errors.append(e)
 
-    def add_warning(self, warning_class: str, message: str, **extra) -> None:
+    def add_warning(
+        self, warning_class: str, message: str,
+        step_index: int | None = None,
+        field_path: str | None = None,
+        recommended_next_actions: list[dict] | None = None,
+        **extra,
+    ) -> None:
+        """v0.8.1: warnings にも step_path / field_path / recommended_next_actions を強化"""
         w: dict[str, Any] = {
             "warning_class": warning_class,
             "message": message,
-            "path": self.path,
+            "step_path": self.path,
         }
+        if step_index is not None:
+            w["step_index"] = step_index
+        if field_path:
+            w["field_path"] = field_path
+        if recommended_next_actions:
+            w["recommended_next_actions"] = recommended_next_actions
+        w["path"] = self.path  # backward compat
         w.update(extra)
         self.warnings.append(w)
 
@@ -200,6 +228,9 @@ def _resolve_instrument(
 
     ctx.resolved[ref] = resource
     ctx.required_resources.add(resource)
+    # v0.8.1: parallel branch walk 中なら branch local にも記録
+    if ctx._branch_resources is not None:
+        ctx._branch_resources.add(resource)
 
     session = ctx.session_mgr.get_session(resource)
     if session is None or session.definition is None:
@@ -224,7 +255,13 @@ def _validate_command(
     args: dict,
     step_index: int,
     expect_type: str | None = None,
+    *,
+    instrument_ref: str | None = None,
+    args_raw: dict | None = None,
 ) -> None:
+    """v0.8.1: instrument_ref / args_raw を渡すことで rendered_steps の
+    可読性を向上 (LLM が「どこの DSL を直すか」を判断しやすくする)。
+    """
     """command の存在 + 型 + パラメータ + safety を検証"""
     from visa_mcp.utils.param_validator import validate_and_build_scpi, ParameterValidationError
 
@@ -328,24 +365,38 @@ def _validate_command(
     # 推定 duration (1 命令 ~ 50ms と仮定、verify あれば +50ms)
     ctx.estimated_duration_s += 0.05 + (0.05 if cmd_def.verify is not None else 0.0)
 
-    # rendered SCPI を dry_run 用に残す
+    # v0.8.1: rendered_steps を agent 可読構造に強化
+    # step_path (階層内位置) / instrument_ref (元 DSL の参照) / resolved_resource /
+    # args_raw (テンプレ展開前) / args_resolved (展開後) を含める
     ctx.rendered_steps.append({
         "step_index": step_index,
-        "path": ctx.path,
+        "step_path": ctx.path,
+        "path": ctx.path,                                  # backward compat
         "step_type": "command" if cmd_def.type == "write" else "query",
+        "command_type": cmd_def.type,                      # "write" or "query"
+        # 元 DSL の instrument_ref ($psu 等)
+        "instrument_ref": instrument_ref if instrument_ref is not None else session.resource_name,
+        "resolved_resource": session.resource_name,
+        # 後方互換: 既存 "instrument" は resolved_resource を入れる
         "instrument": session.resource_name,
         "command": command_name,
-        "args": dict(args),
+        # raw (テンプレ "{voltage}" を含む元 args) と resolved (展開後)
+        "args_raw": dict(args_raw) if args_raw is not None else dict(args),
+        "args_resolved": dict(args),
+        "args": dict(args),                                # backward compat
         "rendered_scpi": rendered,
+        "rendered": rendered,                              # alias
         "safety": {
             "status": "ok" if not violations else f"violated_{mode}",
             "violations": list(violations) if violations else [],
+            "mode": mode,
         },
         "verify": (
             {
                 "enabled": True,
                 "readback_command": cmd_def.verify.readback_command,
                 "tolerance": cmd_def.verify.tolerance,
+                "retry": cmd_def.verify.retry,
             }
             if cmd_def.verify is not None else {"enabled": False}
         ),
@@ -396,6 +447,8 @@ def _convert_step(
         _validate_command(
             ctx, session, s.command, args, step_index,
             expect_type="query" if is_query else None,
+            instrument_ref=s.instrument,
+            args_raw=dict(s.args),
         )
         if resource is None:
             return []
@@ -478,6 +531,24 @@ def _convert_step(
 
     if isinstance(s, DSLSafeShutdownStep):
         ctx.has_safe_shutdown = True
+        # v0.8.1: targets=[] (空配列) は曖昧なので validation error
+        # ("全対象" なら targets を省略、"何もしない" なら step 自体不要)
+        if s.targets is not None and len(s.targets) == 0:
+            ctx.add_error(
+                "safe_shutdown_targets_empty",
+                "safe_shutdown.targets=[] (空配列) は曖昧なため拒否します。"
+                "全 used_resources を対象にするには targets を省略してください。"
+                "何もしない場合は safe_shutdown step 自体を削除してください",
+                step_index=step_index,
+                field_path=f"{ctx.path}.targets",
+                recommended_next_actions=[
+                    {"action": "omit_targets",
+                     "reason": "全 used_resources を対象にする場合は targets を書かない"},
+                    {"action": "remove_step",
+                     "reason": "何もしない場合は step ごと削除する"},
+                ],
+            )
+            return []
         # v0.8.0.1: targets 指定があれば実 resource に解決して保持
         resolved_targets: list[str] | None = None
         if s.targets:
@@ -511,6 +582,24 @@ def _convert_step(
         return []
 
     if isinstance(s, DSLSweepStep):
+        # v0.8.1: sweep body 内に parallel が含まれていたら reject
+        # ("各値ごとに parallel" vs "全展開後 parallel" が曖昧、v1.x で再検討)
+        for j, body_step in enumerate(s.body):
+            if isinstance(body_step, DSLParallelStep):
+                ctx.add_error(
+                    "parallel_inside_sweep",
+                    "sweep.body 内の parallel step は v0.8.x では禁止です "
+                    "(各値ごと parallel か全展開後 parallel かが曖昧)。"
+                    "sweep を抜けた top-level 末尾に parallel を配置してください。"
+                    "v1.x で再検討予定",
+                    step_index=step_index,
+                    field_path=f"{ctx.path}.body[{j}]",
+                    recommended_next_actions=[
+                        {"action": "move_parallel_outside_sweep",
+                         "reason": "parallel を sweep の外側 (top-level 末尾) に移動"},
+                    ],
+                )
+                return []
         # sweep を展開: 各 value で body を複製
         values = s.values.expand()
         if len(values) * max(1, len(s.body)) + ctx.total_expanded_steps > 10000:
@@ -519,6 +608,13 @@ def _convert_step(
                 f"sweep 展開後の総 step 数が大きすぎます "
                 f"({len(values)} × {len(s.body)})",
                 step_index=step_index,
+                field_path=f"{ctx.path}.values",
+                expanded_steps=len(values) * max(1, len(s.body)),
+                limit=10000,
+                recommended_next_actions=[
+                    {"action": "split_plan",
+                     "reason": "sweep の値を分割して複数 plan として実行"},
+                ],
             )
             return []
         expanded: list[IRStep] = []
@@ -535,29 +631,71 @@ def _convert_step(
 
     if isinstance(s, DSLParallelStep):
         # parallel: 各 branch を別 Plan として収集 → ctx.parallel_groups に
-        # v0.8.0 MVP では「parallel は plan の終端で 1 度」想定。
-        # branches を TargetExecution 相当へ落とす。
         saved_path = ctx.path
+        # v0.8.1: branch ごとに使用 resource を集計し、共有 resource を warning
+        branch_resources_list: list[set[str]] = []
         branch_plans: list[Plan] = []
         for i, branch in enumerate(s.branches):
             ctx.path = f"{saved_path}.parallel.branches[{i}]"
             branch_ir: list[IRStep] = []
+            # v0.8.1: branch 内で出現した resource を直接記録 (set 差分では共有検出不可)
+            ctx._branch_resources = set()
             for j, b_step in enumerate(branch):
-                # branch 内で sub-context を共有 (resolved / required_resources は同一)
+                # v0.8.1: branch 内に nested parallel が含まれていたら reject
+                if isinstance(b_step, DSLParallelStep):
+                    ctx.add_error(
+                        "nested_parallel",
+                        "parallel.branches 内の nested parallel は v0.8.x で禁止です。"
+                        "branches を平坦化するか、plan を分割してください",
+                        step_index=step_index,
+                        field_path=f"{ctx.path}[{j}]",
+                        recommended_next_actions=[
+                            {"action": "flatten_branches",
+                             "reason": "nested parallel は実行順序が複雑化するため禁止"},
+                        ],
+                    )
+                    continue
                 old_path = ctx.path
                 ctx.path = f"{ctx.path}[{j}]"
                 branch_ir.extend(_convert_step(ctx, b_step, step_index, variables))
                 ctx.path = old_path
+            branch_resources_list.append(set(ctx._branch_resources))
             branch_plans.append(Plan(
                 name=f"parallel_branch_{i}",
                 steps=branch_ir,
-                # required_resources は実行時 (compile 完了後) に集計
             ))
+        ctx._branch_resources = None
         ctx.path = saved_path
+
+        # v0.8.1: 共有 resource 検出 → warning
+        # (各 branch の resource 集合の積を取り、空でないものがあれば共有あり)
+        for i in range(len(branch_resources_list)):
+            for k in range(i + 1, len(branch_resources_list)):
+                shared = branch_resources_list[i] & branch_resources_list[k]
+                if shared:
+                    for sr in sorted(shared):
+                        ctx.add_warning(
+                            "parallel_shared_resource",
+                            f"parallel.branches[{i}] と branches[{k}] が同じ resource "
+                            f"'{sr}' を使用します。実行は target-level lock で直列化される"
+                            f"ため、真の並列にはなりません",
+                            step_index=step_index,
+                            field_path=f"{saved_path}.parallel",
+                            resource=sr,
+                            branches=[i, k],
+                            recommended_next_actions=[
+                                {"action": "merge_branches",
+                                 "reason": "共有 resource を使う branch は単一 branch に統合"},
+                                {"action": "use_distinct_resources",
+                                 "reason": "branch ごとに別 resource を割り当てる"},
+                            ],
+                        )
+
         ctx.parallel_groups.append({
             "step_index": step_index,
             "concurrency": s.concurrency,
             "branch_plans": branch_plans,
+            "branch_resources": [sorted(r) for r in branch_resources_list],
         })
         # IR Plan には parallel を直接落とさない (JobManager が special handle)
         return []
@@ -641,20 +779,30 @@ def validate_and_compile(
         ir_steps.extend(_convert_step(ctx, s, i, dict(plan.variables)))
         ctx.total_expanded_steps += 1
 
+    # v0.8.1: used_resources = parallel branches も含めた完全な使用 resource 集合
+    # ctx.required_resources は main_plan + parallel branches を walk する過程ですべて
+    # 加算されているため used_resources としても利用可能
+    used = sorted(ctx.required_resources)
+    # required_resources (scheduler 投入用) は main_plan の resource のみ:
+    # parallel branches 含めた used resource は別途 scheduler に渡されるため、
+    # 通常の単一 Plan path では main_plan.required_resources = used
+    # (現状は両者同値、将来 parallel が独立スケジューラに渡される時に分離)
+
     if ctx.errors:
         return CompiledPlan(
             valid=False,
             errors=ctx.errors,
             warnings=ctx.warnings,
-            summary=_make_summary(ctx, plan),
+            summary=_make_summary(ctx, plan, used),
             rendered_steps=list(ctx.rendered_steps),
             resolved_instruments=dict(ctx.resolved),
+            used_resources=used,
         )
 
     main_plan = Plan(
         name=plan.name or "experiment",
         steps=ir_steps,
-        required_resources=sorted(ctx.required_resources),
+        required_resources=used,
         metadata={
             "dsl_version": plan.dsl_version,
             "rendered_step_count": len(ctx.rendered_steps),
@@ -665,30 +813,40 @@ def validate_and_compile(
         valid=True,
         errors=[],
         warnings=ctx.warnings,
-        summary=_make_summary(ctx, plan),
+        summary=_make_summary(ctx, plan, used),
         main_plan=main_plan,
         parallel_groups=ctx.parallel_groups,
         has_safe_shutdown=ctx.has_safe_shutdown,
         safe_shutdown_targets=ctx.safe_shutdown_targets,
         resolved_instruments=dict(ctx.resolved),
         rendered_steps=list(ctx.rendered_steps),
+        used_resources=used,
     )
 
 
-def _make_summary(ctx: _Context, plan: ExperimentPlan) -> dict[str, Any]:
+def _make_summary(ctx: _Context, plan: ExperimentPlan, used: list[str]) -> dict[str, Any]:
     return {
         "dsl_version": plan.dsl_version,
         "name": plan.name,
         "step_count_dsl": len(plan.steps),
         "step_count_expanded": ctx.total_expanded_steps,
         "rendered_step_count": len(ctx.rendered_steps),
-        "required_resources": sorted(ctx.required_resources),
+        "required_resources": used,                 # backward compat (== used_resources)
+        "used_resources": used,                     # v0.8.1: 明示
         "resolved_instruments": dict(ctx.resolved),
         "estimated_duration_s": round(ctx.estimated_duration_s, 2),
         "uses_verify": ctx.uses_verify_count > 0,
         "uses_verify_count": ctx.uses_verify_count,
         "uses_polling": ctx.uses_polling,
         "has_safe_shutdown": ctx.has_safe_shutdown,
+        "safe_shutdown_scope": (
+            "explicit" if ctx.safe_shutdown_targets else
+            ("all_used_resources" if ctx.has_safe_shutdown else "none")
+        ),
+        "safe_shutdown_targets": (
+            ctx.safe_shutdown_targets if ctx.safe_shutdown_targets
+            else (used if ctx.has_safe_shutdown else None)
+        ),
         "has_parallel": len(ctx.parallel_groups) > 0,
         "parallel_group_count": len(ctx.parallel_groups),
     }

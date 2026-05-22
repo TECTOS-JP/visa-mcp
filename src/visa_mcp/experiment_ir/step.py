@@ -264,10 +264,14 @@ class BarrierStep(BaseModel):
     対応範囲 (v0.6.1 MVP):
       - same Map/Group Job 内 target 間 barrier のみ
       - quorum / nested / target-local Plan 内 barrier は未対応
+
+    Field notes (v0.6.1.1 補足):
+      - `timeout_s` は **必ず有限値を持つ**。省略時 default=60s で無限待ちは禁止。
+        (旧 docstring の「必須」表現を訂正: 省略可能だが必ず有限値)
     """
     type: Literal["barrier"] = "barrier"
     name: str
-    timeout_s: float = 60.0
+    timeout_s: float = 60.0   # 省略可能だが必ず有限値 (無限待ち禁止)
     description: str = ""
 
     @field_validator("name")

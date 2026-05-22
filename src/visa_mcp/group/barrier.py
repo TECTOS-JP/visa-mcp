@@ -86,6 +86,22 @@ class BarrierCoordinator:
       await coord.arrive(barrier_name="b1", step_index=2, target_id="t1")
       # target が途中で失敗したら:
       coord.exclude_target("t2")
+
+    Barrier 対象 target の決定規則 (v0.6.1.1 明文化):
+      - register_targets() で渡された全 target が初期 participants
+      - exclude_target(tid) で動的除外 (失敗 / cancelled target)
+      - 各 barrier (name, step_index) の participants は **arrive 時点で
+        その時の non-excluded set がスナップショットされる**
+      - barrier を持たない target が混在する場合: そのような target は
+        arrive() を呼ばないので、他 target が waiting_for に残し続け、
+        最終的に barrier.timeout_s で abort される。
+        → **同一 Map Job 内では全 target が同じ barrier_key 集合を持つことを推奨**
+        (v0.6.1 では validation は行わない、運用ルール)
+
+    abort 後の挙動:
+      - timeout / cancel で abort された barrier に late arrival した target は
+        即座に success=False, error=aborted_reason で return する
+        (新たな wait に入らない)
     """
 
     def __init__(self) -> None:
@@ -153,6 +169,20 @@ class BarrierCoordinator:
           }
         """
         state = await self._get_or_create(name, step_index)
+        # v0.6.1.1: 既に abort 済みの barrier への late arrival は即失敗で返す
+        # (新たな wait に入らない、deadlock 防止)
+        if state.aborted_reason is not None:
+            return {
+                "success": False,
+                "barrier_name": name,
+                "step_index": step_index,
+                "total_expected": state.total_expected(),
+                "arrived": len(state.arrived),
+                "waited_s": 0.0,
+                "error": state.aborted_reason,
+                ("interrupted_by_" + state.aborted_reason): True,
+                "late_arrival": True,
+            }
         state.mark_arrived(target_id)
         t_start = time.monotonic()
         deadline = t_start + timeout_s

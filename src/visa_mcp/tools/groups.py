@@ -155,8 +155,14 @@ def register_tools(mcp: FastMCP, job_mgr: JobManager) -> None:
             "parameters": {"voltage": 1.0},    # recipe parameters
           }
         concurrency: 同時 active target 数
-        failure_policy: {"mode": "continue"|"stop_on_first_error"|"stop_if_failure_rate_exceeds",
-                         "retry": 0, "stop_if_failure_rate_exceeds": 0.5}
+        failure_policy: {
+          "mode": "continue"|"stop_on_first_error"|"stop_if_failure_rate_exceeds",
+          "retry": 0,
+          "stop_if_failure_rate_exceeds": 0.5,
+          # v0.6.1.1: 以下は予約フィールド (現状未実装、入力されても無視)
+          "cancel_running_on_policy_stop": false,     # reserved (v0.6.1+ に予約)
+          "retry_safe_shutdown_before_retry": false,  # reserved (v0.7.0+ に予約)
+        }
         primary_role: recipe を取得する主 instrument の役割名。
           - bindings (unit と merge 後) に 1 つしか role がなければ自動推定
           - **bindings に複数 role がある場合は必須** (v0.6.0.1)。

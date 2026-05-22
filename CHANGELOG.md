@@ -1,5 +1,80 @@
 # 変更履歴
 
+## v0.6.1.1 — 外部レビュー対応 (P0/P1)
+
+v0.6.1 公開後の外部レビューで指摘された P0 二件 + P1 数件への対応。
+コード本体の機能は v0.6.1 で完成しているが、**barrier abort 後の振る舞いの
+明示化** と **stagger progress の公開** を追加。
+
+### P0
+
+- **abort 済み barrier への late arrival を即失敗化 (実装)**
+  - 旧 v0.6.1: `BarrierCoordinator.arrive()` は `state.aborted_reason` の事前
+    チェックを行わず、abort 後でも一度 `mark_arrived` してから wait に入る
+    実装だった。実害は無いが冗長で、最悪のケースで余分な slice wait が走る
+    可能性
+  - 新: `arrive()` 入口で `state.aborted_reason` をチェックし、既に abort 済みなら
+    新たな wait に入らず即座に
+    `{"success": False, "error": aborted_reason, "late_arrival": True}`
+    で return
+- **barrier timeout 後に後続 step が実行されないことの明示テスト追加**
+  - 既存実装で挙動は正しかったが、テストとして明示化していなかった
+  - `test_barrier_timeout_prevents_later_steps`: t0 が barrier で timeout failed
+    した後、その target の後続 `set_output` step が **visa.write に届かない**
+    ことを確認
+
+### P1
+
+- **stagger 中の progress 公開**
+  - GroupExecutor 内に `stagger_tracker: dict[target_id, dict]` を追加
+  - 各 target が stagger sleep 中に登録 / 完了時に削除
+  - `_emit_progress` で集約し、`data.progress.stagger` に
+    `step_index / command / stagger_ms / in_stagger_count / next_target_id /
+    next_start_in_s` を含める
+  - 100 台 × 100ms stagger 等の長い stagger 中にエージェントが「順次起動中」と
+    判断できるようになる
+- **BarrierStep の `timeout_s` docstring 修正**
+  - 旧: 「timeout_s 必須、無限待ち禁止」(省略可能だが省略時 default 60s なので
+    表現が曖昧)
+  - 新: 「**必ず有限値を持つ**。省略時 default=60s で無限待ちは禁止」
+- **BarrierCoordinator docstring に barrier 対象 target 決定規則を明文化**
+  - participants は arrive 時点の non-excluded set スナップショット
+  - barrier を持たない target が混在すると waiting_for に残り続け timeout で
+    abort される
+  - 推奨: 同一 Map Job 内の全 target が同じ barrier_key 集合を持つ
+  - v0.6.1.1 では validation を行わない (運用ルール)
+- **MCP tool schema に予約フィールド明記**
+  - `start_map_recipe_job` の `failure_policy` docstring に
+    `cancel_running_on_policy_stop` / `retry_safe_shutdown_before_retry`
+    が `reserved` であることを明示 (入力されても無視される)
+
+### スコープ外 (v0.7.0+)
+
+- `cancel_running_on_policy_stop` の実装 (v0.6.0.1 から引き続き予約)
+- `retry_safe_shutdown_before_retry` の実装
+- barrier/stagger イベントの SQLite 永続化 (v0.7.0 で `barrier_events` / 等を追加予定)
+- Map Job 全体一括 lock → target 単位 acquire/release への移行 (v0.7.0)
+
+### テスト (4 件追加、合計 297 passed)
+
+`tests/test_barrier_stagger_v0611.py`:
+
+- `test_barrier_timeout_prevents_later_steps` (P0: visa.write 未呼出確認)
+- `test_late_arrival_after_barrier_timeout_fails_immediately`
+  (P0: timeout 後の late arrival が 0.2s 以内に return)
+- `test_late_arrival_after_barrier_cancel` (cancel 後の late arrival)
+- `test_stagger_progress_includes_next_target_id`
+  (P1: progress.stagger に next_target_id / next_start_in_s 含む)
+
+### 後方互換
+
+既存 25 MCP ツール / v0.6.1 YAML / v0.4.x recipe はすべて不変。
+abort 後の late arrival は **元々 wait 開始してから即 abort され同じ結果を
+返していた**ため、エージェント視点では `late_arrival: True` フィールドが
+追加されただけの差分。
+
+---
+
 ## v0.6.1 — Barrier / Stagger
 
 v0.6.0 / v0.6.0.1 で固めた Group/Map MVP の上に、**target 間同期点 (barrier)** と

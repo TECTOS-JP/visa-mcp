@@ -185,6 +185,10 @@ class GroupExecutor:
         barrier_coord = BarrierCoordinator()
         barrier_coord.register_targets([t.target_id for t in targets])
 
+        # v0.6.1.1: stagger tracker (簡易、stagger 中 target → 開始予定時刻 / target_index / step)
+        # _run_target_once が更新、_emit_progress が集約。
+        stagger_tracker: dict[str, dict] = {}
+
         # control flags
         stop_requested = False  # failure_policy で未開始 target をスキップする要求
         cancel_reason: str | None = None  # cancel/timeout 検出時の理由
@@ -219,6 +223,26 @@ class GroupExecutor:
             br = barrier_coord.current_barrier_progress()
             if br is not None:
                 p["barrier"] = br
+            # v0.6.1.1: stagger 中の集約情報
+            if stagger_tracker:
+                now = time.monotonic()
+                items = sorted(
+                    stagger_tracker.values(),
+                    key=lambda x: x.get("expected_start_at", 0.0),
+                )
+                in_progress = [it for it in items if it["expected_start_at"] > now]
+                if in_progress:
+                    next_item = in_progress[0]
+                    p["stagger"] = {
+                        "step_index": next_item.get("step_index"),
+                        "command": next_item.get("command"),
+                        "stagger_ms": next_item.get("stagger_ms"),
+                        "in_stagger_count": len(in_progress),
+                        "next_target_id": next_item.get("target_id"),
+                        "next_start_in_s": max(
+                            0.0, next_item["expected_start_at"] - now,
+                        ),
+                    }
             on_progress(p)
 
         async def _run_one(target: TargetExecution) -> None:
@@ -300,6 +324,8 @@ class GroupExecutor:
                         # v0.6.1: barrier coordinator + target-level lock 制御を渡す
                         barrier_coord=barrier_coord,
                         acquired_locks=acquired_locks,
+                        # v0.6.1.1: stagger progress 集約用
+                        stagger_tracker=stagger_tracker,
                     )
                     res.attempts = attempts
                     res.elapsed_s = time.monotonic() - t0
@@ -428,6 +454,7 @@ class GroupExecutor:
         cancel_check: Callable[[], str | None],
         barrier_coord: "BarrierCoordinator | None" = None,
         acquired_locks: list[asyncio.Lock] | None = None,
+        stagger_tracker: dict[str, dict] | None = None,
     ) -> TargetResult:
         """1 target を Plan に従って実行 (cancel/timeout 即応、step 失敗で halt)
 
@@ -508,21 +535,35 @@ class GroupExecutor:
                     if step.stagger_ms is not None and step.stagger_ms > 0:
                         stagger_s = step.stagger_ms / 1000.0 * target.target_index
                         if stagger_s > 0:
+                            # v0.6.1.1: tracker に登録 (progress 公開用)
+                            t_now = time.monotonic()
+                            if stagger_tracker is not None:
+                                stagger_tracker[target.target_id] = {
+                                    "target_id": target.target_id,
+                                    "step_index": idx,
+                                    "command": step.command,
+                                    "stagger_ms": step.stagger_ms,
+                                    "expected_start_at": t_now + stagger_s,
+                                }
                             # slice 方式で cancel 即応
                             from visa_mcp.polling_executor import POLL_SLEEP_SLICE_S
                             remaining = stagger_s
-                            while remaining > 0:
-                                r = cancel_check()
-                                if r:
-                                    return TargetResult(
-                                        target.target_id, "cancelled",
-                                        error_class="cancelled",
-                                        error_message=f"cancelled during stagger ({r})",
-                                        steps_executed=step_results,
-                                    )
-                                chunk = min(remaining, POLL_SLEEP_SLICE_S)
-                                await asyncio.sleep(chunk)
-                                remaining -= chunk
+                            try:
+                                while remaining > 0:
+                                    r = cancel_check()
+                                    if r:
+                                        return TargetResult(
+                                            target.target_id, "cancelled",
+                                            error_class="cancelled",
+                                            error_message=f"cancelled during stagger ({r})",
+                                            steps_executed=step_results,
+                                        )
+                                    chunk = min(remaining, POLL_SLEEP_SLICE_S)
+                                    await asyncio.sleep(chunk)
+                                    remaining -= chunk
+                            finally:
+                                if stagger_tracker is not None:
+                                    stagger_tracker.pop(target.target_id, None)
 
                     session = _resolve_step_instrument(step)
                     if session is None or session.definition is None:

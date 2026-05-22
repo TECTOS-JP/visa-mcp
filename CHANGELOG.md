@@ -1,5 +1,109 @@
 # 変更履歴
 
+## v0.9.3 — Operational integrity (audit + locks)
+
+合言葉:「**実験を実行できるだけでなく、誰が・いつ・何を・どの resource に
+対して行い、なぜ失敗 / 拒否されたかを後から追えるようにする**」。SQLite
+`audit` / `locks` テーブルを `user_version=3` で追加し、AuditStore + 2 つの
+MCP ツールで監査・lock 競合追跡・stale lock 検出を実現。
+
+### 新規 MCP ツール (2 個、合計 45 → 47)
+
+| ツール | 役割 |
+|--------|------|
+| `query_audit` | 監査ログを filter + cursor pagination で取得 (experimental) |
+| `list_locks` | 現在の resource lock 一覧 / stale 判定 (experimental) |
+
+### SQLite migration (user_version 2 → 3)
+
+- **`audit`** テーブル (audit_id / timestamp / event_type / severity / owner /
+  client_id / tool_name / job_id / resource / target_id / status / error_class
+  / message / request_summary_json / response_summary_json / metadata_json)
+  + 5 indexes (timestamp / job_id / resource / owner / event_type)
+- **`locks`** テーブル (resource PRIMARY KEY / owner / job_id / client_id /
+  acquired_at / lease_until / lock_reason / metadata_json) + 2 indexes
+- 既存 DB は非破壊的に migrate (空テーブル追加のみ)
+
+### AuditStore (`src/visa_mcp/audit.py`)
+
+- `record_event(event_type, *, severity, owner, tool_name, job_id, resource,
+  status, error_class, message, request, response, metadata, ...)` で 1 行 INSERT
+- `query(*, job_id, resource, owner, event_type, severity, since, until,
+  limit, cursor, include_details)` で複合 cursor `{timestamp, audit_id}`
+  pagination
+- `acquire_lock` / `release_lock` / `list_locks` / `release_stale_locks`
+  で lock 操作
+
+### Redaction (`summarize_for_audit`)
+
+`request` / `response` payload を audit に保存する際の安全策:
+
+| 入力 | 変換 |
+|------|------|
+| `len > 200` の文字列 | `{"_truncated": true, "len": N, "head": "..."}` |
+| `len > 5` の list | `{"_truncated_list": true, "len": N, "head": [...]}` |
+| key に `token` / `api_key` / `password` / `secret` / `authorization` / `credentials` | `[REDACTED]` |
+| 深さ 6 超 | `"<deep>"` |
+
+raw SCPI 応答 / 大量測定値 / credentials は保存されない。
+
+### JobManager 統合
+
+- 起動時に `AuditStore` 初期化 + `release_stale_locks()` 実行
+  → `server_started` event を記録 (metadata に `stale_locks_released` 件数)
+- `start_experiment_job` 完了時に `job_started` / `job_failed` を記録
+- `cancel_job` (cancel 経路) で `job_cancelled` 記録
+- `resume_job` 成功時に `resume_started` 記録 (original_job_id /
+  from_step / safe_shutdown_before_resume を metadata に)
+
+### 新規 error_class
+
+| クラス | 意味 | recoverable |
+|--------|------|------|
+| `lock_conflict` | resource lock が他 owner に保持 (`blocked` の詳細種別) | True |
+| `lock_stale` | 自 lock の lease 切れ | True |
+| `audit_query_failed` | query_audit 内部 error (通常は `internal`) | False |
+
+v1.0 で `error_class=blocked` + `details.reason=lock_conflict` に統一するか
+独立 class とするか決定する。
+
+### docs
+
+- `docs/operational_integrity.md` 新規: audit / locks の設計 / 記録対象 /
+  redaction / `query_audit` / `list_locks` / retention 方針
+- `docs/error_taxonomy.md`: `lock_conflict` / `lock_stale` / `audit_query_failed`
+  追記
+
+### テスト
+
+`tests/test_v093_audit_locks.py` 18 件:
+
+- migration (user_version >= 3 / audit + locks テーブル存在 / 列)
+- record_event / query (filter / cursor pagination / include_details default)
+- redaction (sensitive keys / 長文 / 長 list / DB 内も redact 済)
+- locks (acquire / release / owner-only release / stale 検出 / stale 上書き)
+- list_locks (filter / include_stale)
+- JobManager 統合 (server_started 自動記録 / job_started on DSL job)
+- MCP tools (query_audit / list_locks 経由)
+
+**合計 595 件 passing** (v0.9.2.1: 577 → v0.9.3: 595)
+
+### 互換性
+
+- 新フィールド / 新テーブルのみ追加 (既存 DB は migration で空テーブルを追加)
+- `audit` / `locks` 系 API はすべて **experimental** スコープ
+- AuditStore 初期化失敗時は機能を継続 (audit 記録は no-op になる)
+- Stable API 不変
+
+### スコープ外 (v1.0 以降)
+
+- 完全な分散 lock / remote audit backend / WebSocket push
+- audit retention purge (delete API)
+- role-based access control / user authentication
+- ResourceScheduler との完全統合 (v0.9.3 では並行存在、v1.0 で検討)
+
+---
+
 ## v0.9.2.1 — Ecosystem 準備レビュー対応 (P0/P1)
 
 v0.9.2 外部レビュー P0/P1 対応。新規 MCP ツール / CLI 無し、互換維持。

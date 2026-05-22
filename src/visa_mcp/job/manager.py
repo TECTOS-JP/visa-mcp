@@ -143,6 +143,20 @@ class JobManager:
         self._system_config = system_config or SystemConfig()
         # 起動時に running/waiting/cancelling/queued を interrupted に遷移
         self._store.mark_interrupted_on_startup()
+        # v0.9.3: AuditStore + stale lock 解放
+        try:
+            from visa_mcp.audit import AuditStore
+            self._audit = AuditStore(self._store)
+            released = self._audit.release_stale_locks()
+            self._audit.record_event(
+                "server_started",
+                severity="info",
+                metadata={"stale_locks_released": released,
+                           "schema_version": 3},
+            )
+        except Exception:
+            logger.exception("audit init 失敗 (機能継続)")
+            self._audit = None
 
     @property
     def system_config(self) -> SystemConfig:
@@ -168,6 +182,11 @@ class JobManager:
     @property
     def store(self) -> JobStore:
         return self._store
+
+    @property
+    def audit(self):
+        """v0.9.3: AuditStore へのアクセス (experimental)"""
+        return self._audit
 
     @property
     def session_manager(self) -> SessionManager:
@@ -761,6 +780,27 @@ class JobManager:
             )
         # template_source は _dsl_params 経由で create_job parameters に
         # 既に注入済み (compiled.summary["template_source"] から伝播)
+        # v0.9.3: audit
+        if self._audit is not None:
+            try:
+                self._audit.record_event(
+                    "job_started" if rec.status.value != "failed"
+                    else "job_failed",
+                    severity="info" if rec.status.value != "failed" else "error",
+                    status=rec.status.value,
+                    job_id=rec.job_id,
+                    owner=owner,
+                    tool_name="start_experiment_job",
+                    resource=rec.resource_name,
+                    error_class=rec.error_class,
+                    message=rec.last_step_summary,
+                    request={"plan_name": (plan_dict or {}).get("name"),
+                              "queue_policy": queue_policy,
+                              "override_safety": override_safety},
+                    metadata={"template_source": template_source},
+                )
+            except Exception:
+                pass
         return rec
 
     async def _start_experiment_recipe_path(
@@ -2071,7 +2111,25 @@ class JobManager:
         except Exception:
             pass
 
-        return self.get(job_id)
+        rec = self.get(job_id)
+        # v0.9.3: audit
+        if self._audit is not None:
+            try:
+                self._audit.record_event(
+                    "job_cancelled",
+                    severity="warning",
+                    status=rec.status.value,
+                    job_id=job_id,
+                    owner=rec.owner,
+                    tool_name="cancel_job",
+                    resource=rec.resource_name,
+                    metadata={"cancel_mode": cancel_mode.value
+                              if hasattr(cancel_mode, "value")
+                              else str(cancel_mode)},
+                )
+            except Exception:
+                pass
+        return rec
 
     # ---------- resume (v0.9.0 MVP, experimental) ----------
 
@@ -2345,6 +2403,26 @@ class JobManager:
             )
         except Exception:
             pass
+
+        # v0.9.3: audit
+        if self._audit is not None:
+            try:
+                self._audit.record_event(
+                    "resume_started",
+                    severity="info",
+                    status="ok",
+                    tool_name="resume_job",
+                    job_id=new_rec.job_id,
+                    owner=owner or rec.owner,
+                    metadata={
+                        "original_job_id": job_id,
+                        "from_step": from_step,
+                        "safe_shutdown_before_resume":
+                            safe_shutdown_before_resume,
+                    },
+                )
+            except Exception:
+                pass
 
         return {
             "resume_ready": True,

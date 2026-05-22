@@ -196,8 +196,49 @@ CREATE TABLE IF NOT EXISTS experiment_templates (
 """
 
 
+# v0.9.3: audit + locks additions (operational integrity)
+_SCHEMA_V0_9_3_ADDITIONS = """
+CREATE TABLE IF NOT EXISTS audit (
+    audit_id TEXT PRIMARY KEY,
+    timestamp TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    severity TEXT NOT NULL,
+    owner TEXT,
+    client_id TEXT,
+    tool_name TEXT,
+    job_id TEXT,
+    resource TEXT,
+    target_id TEXT,
+    status TEXT NOT NULL,
+    error_class TEXT,
+    message TEXT,
+    request_summary_json TEXT,
+    response_summary_json TEXT,
+    metadata_json TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit(timestamp);
+CREATE INDEX IF NOT EXISTS idx_audit_job_id ON audit(job_id);
+CREATE INDEX IF NOT EXISTS idx_audit_resource ON audit(resource);
+CREATE INDEX IF NOT EXISTS idx_audit_owner ON audit(owner);
+CREATE INDEX IF NOT EXISTS idx_audit_event_type ON audit(event_type);
+
+CREATE TABLE IF NOT EXISTS locks (
+    resource TEXT PRIMARY KEY,
+    owner TEXT NOT NULL,
+    job_id TEXT,
+    client_id TEXT,
+    acquired_at TEXT NOT NULL,
+    lease_until TEXT,
+    lock_reason TEXT,
+    metadata_json TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_locks_owner ON locks(owner);
+CREATE INDEX IF NOT EXISTS idx_locks_job_id ON locks(job_id);
+"""
+
+
 # 現行 schema version (PRAGMA user_version で管理)
-CURRENT_SCHEMA_VERSION = 2
+CURRENT_SCHEMA_VERSION = 3
 
 
 def _apply_migrations(conn: sqlite3.Connection) -> int:
@@ -230,6 +271,17 @@ def _apply_migrations(conn: sqlite3.Connection) -> int:
             "SQLite schema migration: user_version 1 → 2 (v0.8.0 additions)",
         )
         current = 2
+
+    if current < 3:
+        # v0.8.x → v0.9.3: audit + locks 追加 (Operational integrity)
+        conn.executescript(_SCHEMA_V0_9_3_ADDITIONS)
+        conn.execute("PRAGMA user_version = 3")
+        conn.commit()
+        logger.info(
+            "SQLite schema migration: user_version 2 → 3 "
+            "(v0.9.3 additions: audit + locks)",
+        )
+        current = 3
 
     return current
 

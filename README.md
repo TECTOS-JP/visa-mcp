@@ -70,7 +70,7 @@ Claude に話しかける：
 >
 > 「USB0::0x... を identify_instrument で識別して、5V 出力するように設定してください」
 
-## 提供される MCP ツール（45 個 / raw 系は別途オプトイン）
+## 提供される MCP ツール（47 個 / raw 系は別途オプトイン）
 
 ### 識別・情報
 
@@ -150,6 +150,8 @@ Claude に話しかける：
 | `get_job_summary` | 完了 Job の構造化要約 (key_results / failures / verify_summary / recommended_next_actions) |
 | `get_experiment_results` | Job 測定結果を少量確認用 JSON で取得 (experimental) ★v0.9.1 |
 | `export_experiment_results` | Job 測定結果を CSV / JSONL ファイル出力 (path traversal 拒否、sha256 添付、experimental) ★v0.9.1 |
+| `query_audit` | 監査ログを filter + cursor pagination で取得 (experimental) ★v0.9.3 |
+| `list_locks` | 現在の resource lock 一覧 (include_stale、experimental) ★v0.9.3 |
 
 ### 取り込み
 

@@ -16,6 +16,7 @@ from visa_mcp.tools import monitor as monitor_tools
 from visa_mcp.tools import dsl as dsl_tools
 from visa_mcp.tools import observation as observation_tools
 from visa_mcp.tools import export as export_tools
+from visa_mcp.tools import audit as audit_tools
 from visa_mcp.job import JobManager
 from visa_mcp.system_config import SystemConfig
 from visa_mcp.bus_manager import BusManager
@@ -103,6 +104,8 @@ dsl_tools.register_tools(mcp, session_mgr, job_mgr)
 observation_tools.register_tools(mcp, job_mgr)
 # v0.9.1: 測定結果 export ツール (experimental)
 export_tools.register_tools(mcp, job_mgr)
+# v0.9.3: audit / locks ツール (experimental)
+audit_tools.register_tools(mcp, job_mgr)
 pdf_extractor.register_tools(mcp)
 
 

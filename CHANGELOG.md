@@ -1,5 +1,113 @@
 # 変更履歴
 
+## v0.9.0 — Agent Benchmark 基盤 + Job resume MVP
+
+合言葉:「**AI を呼ぶ前に、AI を評価できる実験場を作る**」。LLM を呼ばなくても
+再現可能に評価できる benchmark 基盤と、interrupted/cancelled/failed Job を
+**新規 Job として** 手動再開する resume MVP を導入。
+
+### 新規 MCP ツール (1 個、合計 42 → 43)
+
+| ツール | 役割 |
+|--------|------|
+| `resume_job` | interrupted/cancelled/failed/timeout Job を新規 Job として再開 (experimental) |
+
+### Benchmark 基盤 (`src/visa_mcp/testing/`, `benchmarks/`)
+
+LLM を呼ばずに validate / dry_run / mock execution の 3 layer で回帰評価する
+パッケージ。`src/visa_mcp/testing/` を **experimental** として追加:
+
+- **`benchmark_task.py`**: `BenchmarkTask` Pydantic schema (input / expected /
+  fixtures / success_criteria)。`load_benchmark_task(path)` /
+  `load_benchmark_tasks(dir)`。
+- **`mock_instruments.py`**: `MockVisaManager` (VisaManager 互換 async API
+  ですが VISA 依存ゼロ) + `InstrumentScenario` (9 mode: constant / echo /
+  stable / stable_after / drifting / timeout / flaky / verify_mismatch /
+  raise_protocol)。fixture YAML から制御可能。
+- **`benchmark_runner.py`**: `BenchmarkRunner.run(task)` で 3 layer 実行 →
+  `BenchmarkResult(status, scores, checks[], artifacts, tool_call_log)` を返す。
+- **`run_task_file(...)`**: CLI / pytest から 1 タスクを起動する shortcut。
+
+### Benchmark task fixtures (`benchmarks/`)
+
+```
+benchmarks/
+├── README.md
+├── tasks/
+│   ├── task_001_basic_validate_dry_run.yaml   # validate / dry-run only
+│   ├── task_002_unit_based_voltage_sweep.yaml # unit + sweep + execute
+│   ├── task_003_template_override_run.yaml    # template + parameters override
+│   ├── task_004_verify_mismatch.yaml          # verify mismatch シナリオ
+│   └── task_005_partial_failure_group.yaml    # parallel 1 branch timeout
+└── fixtures/
+    ├── system_config_basic.yaml
+    ├── system_config_partial_failure.yaml
+    └── instruments/
+        ├── mock_psu.yaml
+        ├── mock_dmm.yaml
+        └── mock_temp.yaml
+```
+
+5 件のうち 4 件は **passed**、1 件 (task_004) は permissive mode の挙動を
+ドキュメント化する目的で `job_status: completed` を期待 (verify 失敗は
+step.result.verify に記録)。
+
+### `resume_job` MVP (experimental)
+
+**設計 (実装方針 #10 案 B): 新規 Job 方式**
+
+- 元 Job の status は変えず、`resumed_from_job_id` を持つ **新 Job** を作る
+- 履歴は両 Job の `job_events` に残す:
+  - 元 Job 側: `resume_started` (payload: resumed_job_id / from_step)
+  - 新 Job 側: `job_resumed` (payload: original_job_id / from_step)
+- 新 Job の `parameters.template_source.resume = {resumed_from_job_id,
+  resumed_from_step, original_total_steps}`
+
+**安全制約 (実装方針 #8 / #9):**
+
+- `from_step=None` は **実行されない** (`suggested_from_step` を返すだけ)
+- `dry_run=True` で `steps_to_execute` / `required_resources` / warnings を
+  返す (Job 起動なし)
+- **`resume_may_repeat_side_effects` warning が必ず付く**
+- resume 可能 status: `interrupted` / `cancelled` / `failed` / `timeout`
+  のみ
+- resume 不可: `completed` / `running` / `waiting` / `safe_shutdown_failed`
+  終端 / experiment_plan 未保存 / dsl_version 非互換
+- `safe_shutdown_before_resume=True` で再開前に best_effort_safe_shutdown
+  を試行 (結果は warnings に記録)
+
+新 `error_class`: `resume_not_allowed` (error_taxonomy への追加候補)。
+
+### docs / examples
+
+- `benchmarks/README.md`: benchmark 全体の使い方
+- `docs/error_taxonomy.md`: `resume_not_allowed` を追記
+
+### テスト
+
+- `tests/test_benchmark_v090.py`: 14 件 (schema loader / mock 各 mode /
+  3 layer runner / 4 タスク実行 / result shape)
+- `tests/test_resume_v090.py`: 8 件 (completed/running 拒否 / not_found /
+  experiment_plan 必須 / from_step=None 拒否 / dry_run / invalid from_step /
+  新 Job 作成 + resumed_from_job_id / job_events 記録)
+- **合計 487 passing** (v0.8.3.1: 465 → v0.9.0: 487)
+
+### 互換性
+
+- `resume_job` は **experimental** スコープ。v0.9.x 内で API 変更ある可能性。
+- `src/visa_mcp/testing/` パッケージも experimental (v1.0 で外部公開検討)。
+- Stable API 不変。
+
+### スコープ外 (v0.9.0)
+
+- 本物の LLM 呼び出し評価 (v1.0)
+- self-repair loop (v0.9.1)
+- 測定結果 export API (v0.9.1)
+- audit SQLite migration (v0.9.3)
+- step-level fully idempotent checkpoint (v1.1+)
+
+---
+
 ## v0.8.3.1 — DSL usability refinement レビュー対応 (P1/P2)
 
 v0.8.3 外部レビューの P1/P2 指摘に対応。新規 MCP ツールなし、互換維持

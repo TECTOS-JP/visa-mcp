@@ -436,3 +436,67 @@ def register_tools(mcp: FastMCP, job_mgr: JobManager) -> None:
             },
             job_id=rec.job_id,
         )
+
+    @mcp.tool()
+    async def resume_job(
+        job_id: str,
+        from_step: int | None = None,
+        dry_run: bool = False,
+        safe_shutdown_before_resume: bool = False,
+        owner: str = "",
+    ) -> dict:
+        """**(experimental, v0.9.0)** interrupted / cancelled / failed / timeout
+        Job を **新規 Job として** 手動再開する。
+
+        設計 (実装方針 #10 案 B):
+          - 元 Job の status は変えず、resumed_from_job_id を持つ新 Job を作る
+          - 履歴は両 Job の job_events に残す (`resume_started` /`job_resumed`)
+
+        引数:
+          job_id: 再開元の元 Job
+          from_step: 再開する **top-level step index** (DSL `steps[]`)。
+                     `None` の場合は実行されず、`suggested_from_step` を返すだけ。
+          dry_run: True で Job を起動せず steps_to_execute / required_resources
+                   / warnings を返す。AI/人間が再開内容を事前確認するため。
+          safe_shutdown_before_resume: True で再開前に required_resources に
+                   best_effort_safe_shutdown を試行 (結果は warnings に記録)。
+          owner: 新 Job の owner (省略時は元 Job の owner を継承)。
+
+        resume 可能条件 (満たさないと resume_not_allowed):
+          - 元 Job が interrupted / cancelled / failed / timeout のいずれか
+          - experiment_plan が保存されている (DSL Job 由来)
+          - dsl_version が現バージョンと互換
+          - safe_shutdown_failed 終端でない
+
+        ⚠ from_step より前の step は完了済みと仮定される。
+        `resume_may_repeat_side_effects` warning が必ず付く。
+        """
+        try:
+            data = await job_mgr.resume_job(
+                job_id, from_step=from_step, dry_run=dry_run,
+                safe_shutdown_before_resume=safe_shutdown_before_resume,
+                owner=owner,
+            )
+        except Exception as e:
+            return make_envelope(
+                "error",
+                errors=[make_error("internal", str(e), recoverable=False)],
+            )
+        errs = data.get("errors") or []
+        if errs:
+            return make_envelope(
+                "error",
+                data=data,
+                errors=[
+                    make_error(
+                        e.get("error_class", "validation"),
+                        e.get("message", "?"),
+                        recoverable=True,
+                        recommended_next_actions=e.get("recommended_next_actions"),
+                        details=e.get("details"),
+                    )
+                    for e in errs
+                ],
+            )
+        return make_envelope("ok", data=data,
+                             job_id=data.get("resumed_job_id") or job_id)

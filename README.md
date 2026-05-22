@@ -70,7 +70,7 @@ Claude に話しかける：
 >
 > 「USB0::0x... を identify_instrument で識別して、5V 出力するように設定してください」
 
-## 提供される MCP ツール（42 個 / raw 系は別途オプトイン）
+## 提供される MCP ツール（43 個 / raw 系は別途オプトイン）
 
 ### 識別・情報
 
@@ -106,6 +106,7 @@ Claude に話しかける：
 | `get_job_result` | 完了/失敗時の完全結果 + 次手候補 |
 | `list_jobs` | Job 一覧 (status / owner / limit で絞り込み) |
 | `cancel_job` | Job キャンセル (immediate / after_current_step / safe_shutdown) |
+| `resume_job` | interrupted / cancelled / failed / timeout Job を **新規 Job として** 再開 (dry_run / from_step 明示必須、experimental) ★v0.9.0 |
 
 ### **Group / Map (並列実行)** ★v0.6.0 新規
 

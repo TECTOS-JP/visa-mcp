@@ -46,6 +46,7 @@ AI エージェントが「次の判断」を決めるために、`error_class` 
 | `blocked` | resource が他 Job により busy | True (待機) |
 | `cancelled` | cancel_job により停止 | True |
 | `interrupted` | サーバ再起動で中断 | True |
+| `resume_not_allowed` | `resume_job` の前提条件を満たさない (completed/running/safe_shutdown_failed/dsl_version 非互換 等) (v0.9.0) | False |
 | `WaitConditionTimeout` | wait_for_condition timeout | True |
 | `WaitStableTimeout` | wait_for_stable timeout | True |
 | `PollingErrorExceeded` | polling の連続エラーが max_consecutive_errors 超過 | True |

@@ -2073,6 +2073,257 @@ class JobManager:
 
         return self.get(job_id)
 
+    # ---------- resume (v0.9.0 MVP, experimental) ----------
+
+    async def resume_job(
+        self,
+        job_id: str,
+        *,
+        from_step: int | None = None,
+        dry_run: bool = False,
+        safe_shutdown_before_resume: bool = False,
+        owner: str = "",
+    ) -> dict[str, Any]:
+        """v0.9.0 (experimental): interrupted / cancelled / failed Job を手動再開する。
+
+        設計 (実装方針 #10 案 B): **新規 Job を作って resumed_from_job_id を紐づける**
+        (元 Job の status は変えない)。
+
+        Returns:
+            dry_run=True or 検証失敗時:
+                {
+                  "resume_ready": bool, "original_job_id": ..., "suggested_from_step":
+                  int, "requested_from_step": int|None, "steps_to_execute": [...],
+                  "required_resources": [...], "warnings": [...], "errors": [...]
+                }
+            dry_run=False で成功:
+                {
+                  "resume_ready": True, "original_job_id": ...,
+                  "resumed_job_id": <新 Job>, "resumed_job_status": ...,
+                  "from_step": int
+                }
+        """
+        warnings: list[dict] = []
+        errors: list[dict] = []
+
+        try:
+            rec = self.get(job_id)
+        except Exception:
+            return {
+                "resume_ready": False,
+                "errors": [{
+                    "error_class": "not_found",
+                    "message": f"job not found: {job_id}",
+                }],
+            }
+
+        # ---- 1. resume 可能 status ----
+        ALLOWED = ("interrupted", "cancelled", "failed", "timeout")
+        if rec.status.value not in ALLOWED:
+            errors.append({
+                "error_class": "resume_not_allowed",
+                "message": (
+                    f"job_status={rec.status.value} は resume 対象外。"
+                    f"許可: {ALLOWED}"
+                ),
+                "recommended_next_actions": [
+                    {"action": "start_new_job",
+                     "reason": "completed/running Job は再実行ではなく新 Job として起動"},
+                ],
+            })
+            return {
+                "resume_ready": False, "original_job_id": job_id, "errors": errors,
+            }
+
+        # ---- 2. original_plan の取得 ----
+        plan_row = self._store.get_experiment_plan_for_job(job_id)
+        if plan_row is None or not plan_row.get("original_plan"):
+            errors.append({
+                "error_class": "resume_not_allowed",
+                "message": "experiment_plan が保存されていません (resume には DSL Job が必要)",
+            })
+            return {
+                "resume_ready": False, "original_job_id": job_id, "errors": errors,
+            }
+        original_plan = plan_row["original_plan"]
+        if not isinstance(original_plan, dict):
+            errors.append({
+                "error_class": "resume_not_allowed",
+                "message": "original_plan が JSON object ではありません",
+            })
+            return {
+                "resume_ready": False, "original_job_id": job_id, "errors": errors,
+            }
+
+        dsl_version = original_plan.get("dsl_version", "0.8")
+        if dsl_version not in ("0.8",):
+            errors.append({
+                "error_class": "resume_not_allowed",
+                "message": (
+                    f"dsl_version={dsl_version} は現在 resume 非互換 "
+                    f"(現バージョン: 0.8)"
+                ),
+            })
+            return {
+                "resume_ready": False, "original_job_id": job_id, "errors": errors,
+            }
+
+        # safe_shutdown_failed は resume 不可 (実装方針 #9)
+        if rec.error_class == "safe_shutdown_failed":
+            errors.append({
+                "error_class": "resume_not_allowed",
+                "message": "safe_shutdown_failed 終端 Job は resume 不可",
+            })
+            return {
+                "resume_ready": False, "original_job_id": job_id, "errors": errors,
+            }
+
+        # ---- 3. suggested_from_step (元 Job が止まった位置の次) ----
+        total_steps = len(original_plan.get("steps") or [])
+        last_idx = rec.current_step_index if rec.current_step_index is not None else -1
+        suggested = max(0, (last_idx + 1) if last_idx >= 0 else 0)
+        if suggested > total_steps:
+            suggested = total_steps
+
+        # ---- 4. from_step 範囲チェック ----
+        if from_step is not None:
+            if from_step < 0 or from_step > total_steps:
+                errors.append({
+                    "error_class": "validation",
+                    "message": (
+                        f"from_step={from_step} は範囲外 (0..{total_steps})"
+                    ),
+                    "details": {
+                        "field": "from_step", "total_steps": total_steps,
+                    },
+                })
+                return {
+                    "resume_ready": False, "original_job_id": job_id,
+                    "suggested_from_step": suggested, "errors": errors,
+                }
+
+        # ---- 5. dry_run mode / from_step 未指定: 分析だけ返す ----
+        warnings.append({
+            "warning_class": "resume_may_repeat_side_effects",
+            "message": (
+                "from_step より前の step は完了済みと仮定されます。"
+                "実機状態によっては副作用が再発する可能性があるため、"
+                "safe_shutdown_before_resume=True または手動で機器状態を確認してください"
+            ),
+        })
+
+        # remaining_steps は from_step 以降を表示
+        requested = from_step if from_step is not None else suggested
+        remaining = (original_plan.get("steps") or [])[requested:]
+        steps_to_execute_view = []
+        for i, s in enumerate(remaining):
+            if isinstance(s, dict):
+                steps_to_execute_view.append({
+                    "step_index": requested + i,
+                    "type": s.get("type"),
+                    "instrument": s.get("instrument"),
+                    "command": s.get("command"),
+                })
+
+        # compile して required_resources を得る (実機 I/O なし)
+        try:
+            sliced = dict(original_plan)
+            sliced["steps"] = remaining
+            from visa_mcp.dsl.compiler import validate_and_compile
+            compiled = validate_and_compile(
+                sliced, self._sessions, self._system_config,
+            )
+            required = compiled.used_resources
+        except Exception:
+            required = []
+
+        if dry_run or from_step is None:
+            data = {
+                "resume_ready": True if from_step is not None else False,
+                "original_job_id": job_id,
+                "suggested_from_step": suggested,
+                "requested_from_step": from_step,
+                "total_steps": total_steps,
+                "steps_to_execute": steps_to_execute_view,
+                "required_resources": required,
+                "warnings": warnings,
+            }
+            if from_step is None:
+                data["errors"] = [{
+                    "error_class": "validation",
+                    "message": (
+                        "from_step が明示されていません。dry_run で steps_to_execute "
+                        "を確認した上で from_step を指定してください"
+                    ),
+                    "details": {"requires_explicit_from_step": True,
+                                "suggested_from_step": suggested},
+                }]
+            return data
+
+        # ---- 6. safe_shutdown_before_resume (best effort) ----
+        if safe_shutdown_before_resume:
+            shutdown_results = []
+            for r in required:
+                try:
+                    session = self._sessions.get_session(r)
+                    if session is not None:
+                        sd = await self._best_effort_safe_shutdown(session)
+                        shutdown_results.append({"resource": r, **sd})
+                except Exception as e:
+                    shutdown_results.append({"resource": r, "ok": False,
+                                              "error": str(e)})
+            warnings.append({
+                "warning_class": "safe_shutdown_applied_before_resume",
+                "results": shutdown_results,
+            })
+
+        # ---- 7. 新規 Job を作って残り steps を実行 ----
+        resume_marker = {
+            "resumed_from_job_id": job_id,
+            "resumed_from_step": from_step,
+            "original_total_steps": total_steps,
+        }
+        # template_source 経由で metadata に乗せる (compiled.summary 経由)
+        sliced_plan = dict(original_plan)
+        sliced_plan["steps"] = remaining
+        if not sliced_plan.get("name"):
+            sliced_plan["name"] = f"resumed_from_{job_id}"
+
+        new_rec = await self.start_experiment_job(
+            plan_dict=sliced_plan, owner=owner or rec.owner,
+            template_source={"resume": resume_marker},
+        )
+
+        # 元 Job の job_events に resume_started を記録
+        try:
+            self._store.record_event(
+                job_id, "resume_started",
+                payload={
+                    "resumed_job_id": new_rec.job_id,
+                    "from_step": from_step,
+                },
+            )
+            self._store.record_event(
+                new_rec.job_id, "job_resumed",
+                payload={
+                    "original_job_id": job_id,
+                    "from_step": from_step,
+                },
+            )
+        except Exception:
+            pass
+
+        return {
+            "resume_ready": True,
+            "original_job_id": job_id,
+            "resumed_job_id": new_rec.job_id,
+            "resumed_job_status": new_rec.status.value,
+            "from_step": from_step,
+            "suggested_from_step": suggested,
+            "required_resources": required,
+            "warnings": warnings,
+        }
+
     # ---------- internal ----------
 
     def _new_job_id(self) -> str:

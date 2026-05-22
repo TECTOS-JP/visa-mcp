@@ -157,7 +157,11 @@ class GroupExecutor:
         override_reason: str = "",
         cancel_check: Callable[[], str | None] | None = None,
         on_progress: Callable[[dict], None] | None = None,
+        on_event: Callable[[str, dict], None] | None = None,
     ) -> dict:
+        """v0.7.0: on_event(event_type, payload) callback で
+        target_started/completed/failed や barrier_arrived 等を JobStore に
+        記録できる。指定なしなら no-op。"""
         """
         targets を並列実行する。返り値:
           {
@@ -305,6 +309,15 @@ class GroupExecutor:
 
                 # mark running (progress 用)
                 results[target.target_id] = TargetResult(target.target_id, "running")
+                if on_event is not None:
+                    try:
+                        on_event("target_started", {
+                            "target_id": target.target_id,
+                            "required_resources": target.required_resources,
+                            "bindings": dict(target.bindings),
+                        })
+                    except Exception:
+                        pass
                 _emit_progress()
 
                 attempts = 0
@@ -343,6 +356,23 @@ class GroupExecutor:
                 # (他 target が待ち続けて deadlock するのを防ぐ)
                 if last_result and last_result.status != "ok":
                     barrier_coord.exclude_target(target.target_id)
+
+                # v0.7.0: target_completed / target_failed event
+                if on_event is not None and last_result is not None:
+                    try:
+                        ev_type = (
+                            "target_completed" if last_result.status == "ok"
+                            else "target_failed"
+                        )
+                        on_event(ev_type, {
+                            "target_id": target.target_id,
+                            "status": last_result.status,
+                            "attempts": last_result.attempts,
+                            "elapsed_s": last_result.elapsed_s,
+                            "error_class": last_result.error_class,
+                        })
+                    except Exception:
+                        pass
 
                 results[target.target_id] = last_result or TargetResult(
                     target.target_id, "failed",
@@ -496,6 +526,10 @@ class GroupExecutor:
                     )
 
                 if isinstance(step, BarrierStep):
+                    # v0.7.0: on_event hook が ある場合は GroupExecutor.run() の
+                    # クロージャに保存された関数を呼ぶ。_run_target_once は
+                    # クロージャ外なので、step result に barrier 情報を含める
+                    # 既存挙動で十分。barrier_arrived/completed は run() 側で発火する
                     if barrier_coord is None:
                         # 単一 target 経路で barrier に到達した → no-op として通すか
                         # 不整合エラーかは仕様次第。execute_recipe では事前に reject 済み。

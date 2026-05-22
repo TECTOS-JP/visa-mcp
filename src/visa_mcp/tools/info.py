@@ -1,14 +1,32 @@
 """
 機器情報・安全制約を LLM に提供するためのツール (v0.2.0)
+
+v0.7.0: describe_instrument / get_state / get_last_measurement を追加。
 """
 from __future__ import annotations
+import logging
+from typing import Any
+
 from fastmcp import FastMCP
+
+from visa_mcp.response_envelope import make_envelope, make_error
 from visa_mcp.session_manager import SessionManager
+from visa_mcp.state_query import query_all_state
 from visa_mcp.utils.param_validator import validate_and_build_scpi, ParameterValidationError
+from visa_mcp.visa_manager import VisaManager
 from visa_mcp import safety as sf
 
+logger = logging.getLogger(__name__)
 
-def register_tools(mcp: FastMCP, session_mgr: SessionManager) -> None:
+
+def register_tools(
+    mcp: FastMCP,
+    session_mgr: SessionManager,
+    visa: VisaManager | None = None,
+    job_mgr=None,
+) -> None:
+    """v0.7.0: visa / job_mgr が渡された場合のみ get_state / get_last_measurement /
+    describe_instrument を登録。後方互換のため Optional。"""
 
     @mcp.tool()
     async def get_instrument_info(resource_name: str) -> dict:
@@ -130,3 +148,250 @@ def register_tools(mcp: FastMCP, session_mgr: SessionManager) -> None:
                 "can_override": bool(violations) and mode == "advisory",
             },
         }
+
+    # =====================================================================
+    # v0.7.0: describe_instrument / get_state / get_last_measurement
+    # =====================================================================
+
+    if visa is None:
+        return  # job_mgr / visa が無ければここで終了
+
+    @mcp.tool()
+    async def describe_instrument(resource_name: str) -> dict:
+        """機器の能力サマリを LLM 向け構造化 JSON で返す (v0.7.0)
+
+        get_instrument_info より高レベルかつ要約。
+        capabilities / state_keys / recommended_usage を含む。
+        """
+        session = session_mgr.get_session(resource_name)
+        if session is None or session.definition is None:
+            return make_envelope(
+                "error",
+                errors=[make_error(
+                    "not_found",
+                    f"{resource_name} は未識別、または YAML 定義がありません。",
+                    recoverable=False,
+                )],
+            )
+        d = session.definition
+        data = {
+            "resource_name": resource_name,
+            "identity": {
+                "manufacturer": d.metadata.manufacturer,
+                "model": d.metadata.model,
+                "description": d.metadata.description,
+            },
+            "category": d.metadata.category,
+            "capabilities": {
+                "commands": list(d.commands.keys()),
+                "recipes": list(d.recipes.keys()),
+                "state_keys": list(d.state_query.keys()),
+                "safe_shutdown_defined": bool(d.safe_shutdown),
+            },
+            "safety": {
+                "mode": sf.get_safety_mode(),
+                "ratings": {k: v.model_dump() for k, v in d.safety.ratings.items()},
+                "cautions_count": len(d.safety.cautions),
+                "preconditions_count": len(d.safety.preconditions),
+            },
+            "polling_safe_commands": [
+                k for k, v in d.commands.items() if v.polling_safe
+            ],
+            "verify_enabled_commands": [
+                k for k, v in d.commands.items() if v.verify is not None
+            ],
+            "recommended_usage": {
+                "long_running": "start_recipe_job を使用 (進捗は get_job_status)",
+                "polling": (
+                    "wait_for_stable / wait_for_condition / start_monitor を選択。"
+                    "polling_safe=True の command を推奨"
+                ),
+                "verify_writes": (
+                    "verify を持つ command は write 後に自動で read-back 検証されます"
+                    if any(v.verify for v in d.commands.values())
+                    else "verify 未定義 (write 後の自動検証は行われません)"
+                ),
+                "state_inspection": (
+                    "get_state で state_keys を取得可能"
+                    if d.state_query else "state_query 未定義 (get_state 利用不可)"
+                ),
+            },
+        }
+        return make_envelope("ok", data=data)
+
+    @mcp.tool()
+    async def get_state(
+        resource_name: str,
+        keys: list[str] | None = None,
+        max_age_s: float = 0.0,
+    ) -> dict:
+        """機器の現在状態を state_query 定義に従って取得 (v0.7.0)
+
+        resource_name: VISA resource 名
+        keys: 取得する state_query キー (空/None なら全件)
+        max_age_s: measurement_cache で 0 < age <= max_age_s なら cache を返す。
+                   0 (デフォルト) なら必ず実機 query。
+
+        返り値 data.state は {key: {value, unit, age_s, ...}, ...}
+        """
+        session = session_mgr.get_session(resource_name)
+        if session is None or session.definition is None:
+            return make_envelope(
+                "error",
+                errors=[make_error(
+                    "not_found",
+                    f"{resource_name} は未識別です",
+                    recoverable=False,
+                )],
+            )
+        if not session.definition.state_query:
+            return make_envelope(
+                "error",
+                errors=[make_error(
+                    "validation",
+                    f"{resource_name} の state_query が定義されていません",
+                    recoverable=False,
+                )],
+            )
+
+        target_keys = keys or list(session.definition.state_query.keys())
+        # cache lookup
+        from datetime import datetime, timezone
+        from visa_mcp.state_query import query_state_item
+        state: dict[str, Any] = {}
+        now = datetime.now(timezone.utc)
+        store = job_mgr.store if job_mgr is not None else None
+        for k in target_keys:
+            if k not in session.definition.state_query:
+                state[k] = {"value": None, "error": "unknown_key"}
+                continue
+            item = session.definition.state_query[k]
+            cached = None
+            if store is not None and max_age_s > 0:
+                cached = store.get_measurement_cache(resource_name, k)
+            use_cache = False
+            if cached is not None:
+                try:
+                    ts = datetime.fromisoformat(cached["timestamp"])
+                    age = (now - ts).total_seconds()
+                    if 0 <= age <= max_age_s:
+                        state[k] = {
+                            "value": cached["value"],
+                            "unit": cached["unit"],
+                            "age_s": round(age, 3),
+                            "cached": True,
+                            "timestamp": cached["timestamp"],
+                        }
+                        use_cache = True
+                except Exception:
+                    use_cache = False
+            if not use_cache:
+                r = await query_state_item(visa, session, k, item)
+                value = r.get("value")
+                state[k] = {
+                    "value": value,
+                    "unit": item.unit,
+                    "age_s": 0.0,
+                    "cached": False,
+                }
+                if r.get("error"):
+                    state[k]["error"] = r["error"]
+                    state[k]["message"] = r.get("message")
+                # cache 更新
+                if store is not None and value is not None and not r.get("error"):
+                    try:
+                        store.upsert_measurement_cache(
+                            resource_name, k, value, unit=item.unit,
+                        )
+                    except Exception as e:
+                        logger.warning("measurement_cache 更新失敗: %s", e)
+
+        return make_envelope("ok", data={
+            "resource_name": resource_name,
+            "state": state,
+        })
+
+    @mcp.tool()
+    async def get_last_measurement(
+        instrument: str,
+        measurement: str,
+        max_age_s: float = 60.0,
+    ) -> dict:
+        """測定値キャッシュから最新値を取得 (v0.7.0)
+
+        cache が無い、または age > max_age_s なら、state_query 定義に従って
+        実機 query して cache 更新後の値を返す。
+
+        instrument: VISA resource 名
+        measurement: state_query のキー名 (例: "voltage")
+        max_age_s: cache 受容年齢 (s)
+        """
+        store = job_mgr.store if job_mgr is not None else None
+        if store is None:
+            return make_envelope(
+                "error",
+                errors=[make_error("internal", "store not available")],
+            )
+
+        session = session_mgr.get_session(instrument)
+        if session is None or session.definition is None:
+            return make_envelope(
+                "error",
+                errors=[make_error("not_found", f"{instrument} は未識別です")],
+            )
+
+        from datetime import datetime, timezone
+        cached = store.get_measurement_cache(instrument, measurement)
+        now = datetime.now(timezone.utc)
+        if cached is not None:
+            try:
+                ts = datetime.fromisoformat(cached["timestamp"])
+                age = (now - ts).total_seconds()
+                if 0 <= age <= max_age_s:
+                    return make_envelope("ok", data={
+                        "instrument": instrument,
+                        "measurement": measurement,
+                        "value": cached["value"],
+                        "unit": cached["unit"],
+                        "age_s": round(age, 3),
+                        "cached": True,
+                        "timestamp": cached["timestamp"],
+                    })
+            except Exception:
+                pass
+
+        # cache 古い or なし → state_query から再取得
+        item = session.definition.state_query.get(measurement)
+        if item is None:
+            return make_envelope(
+                "error",
+                errors=[make_error(
+                    "not_found",
+                    f"state_query.{measurement} が定義されていません",
+                )],
+            )
+        from visa_mcp.state_query import query_state_item
+        r = await query_state_item(visa, session, measurement, item)
+        if r.get("error"):
+            return make_envelope(
+                "error",
+                errors=[make_error(
+                    r["error"],
+                    r.get("message", "read-back failed"),
+                )],
+            )
+        value = r.get("value")
+        try:
+            store.upsert_measurement_cache(
+                instrument, measurement, value, unit=item.unit,
+            )
+        except Exception:
+            pass
+        return make_envelope("ok", data={
+            "instrument": instrument,
+            "measurement": measurement,
+            "value": value,
+            "unit": item.unit,
+            "age_s": 0.0,
+            "cached": False,
+        })

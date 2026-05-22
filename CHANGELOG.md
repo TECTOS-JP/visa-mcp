@@ -1,5 +1,175 @@
 # 変更履歴
 
+## v0.7.0 — Persistence + self-awareness + verify
+
+v0.5 / v0.6 系で固めた「動く」実装の上に、**追跡できる・検証できる・状態を
+見られる**層を追加。実験実行基盤としての観察性・検証性・永続性が一段上がる。
+
+### 実装方針 (visa_mcp_v0.7.0の実装方針.md) 採用 3 本柱
+
+1. **Persistence**: 実験実行履歴を SQLite に残す
+2. **Self-awareness**: 機器の現在状態を構造化して取得する
+3. **Verify**: write 後に read-back して実機反映を検証する
+
+### SQLite schema 拡張 (PRAGMA user_version=1)
+
+既存 v0.5.x の `jobs` テーブルは保持し、新規 5 テーブルを **非破壊的に追加**:
+
+```sql
+job_steps           -- step 単位の実行履歴 (target_id 対応)
+target_runs         -- Group/Map の target 単位集約
+job_events          -- 時系列イベント (barrier/stagger/poll/cancel/verify/...)
+measurement_cache   -- 最新測定値キャッシュ (上書き、instrument+measurement 主キー)
+monitor_data        -- monitor jobs の時系列データ
+```
+
+migration は `_apply_migrations()` が `PRAGMA user_version` を見て自動実行。
+既存 DB は `user_version=0` から `1` に上がり、jobs テーブルのデータは保持される。
+
+### 新規 MCP ツール (6 個、合計 25 → 31)
+
+| ツール | 用途 |
+|--------|------|
+| `describe_instrument` | 機器の能力サマリ (capabilities / state_keys / recommended_usage) を構造化 JSON で |
+| `get_state` | `state_query` 定義に従い機器状態取得。`keys` 絞り込み / `max_age_s` cache 受容 |
+| `get_last_measurement` | `measurement_cache` から最新値、age > max_age_s なら自動再取得 |
+| `start_monitor` | 定期測定 Monitor Job (`monitor_data` 保存、`stop_condition_expr` 対応) |
+| `stop_monitor` | Monitor Job 停止 (cancel_job alias) |
+| `get_monitor_data` | 時系列データ取得 (limit/offset、`get_job_result` から分離して大量データ対応) |
+
+### YAML 拡張
+
+**`commands.<name>.verify:`** (write 系 command の read-back 検証):
+
+```yaml
+commands:
+  set_voltage:
+    scpi: "VOLT {voltage}"
+    type: write
+    verify:
+      readback_command: measure_voltage
+      tolerance: 0.05
+      retry: 1
+      delay_s: 0.2
+```
+
+**`state_query:`** (機器状態 query 定義):
+
+```yaml
+state_query:
+  voltage:
+    command: measure_voltage
+    unit: V
+  output:
+    command: query_output
+    map:
+      "1": "ON"
+      "0": "OFF"
+```
+
+### verify (write 後 read-back) ロジック
+
+write 直後に `readback_command` を実行し、write の `args[*]` (または
+`arg_key`) と比較。`abs(actual - expected) <= tolerance` で verified。
+不一致なら `retry` 回まで再 read-back。
+
+**safety_mode との連携**:
+- `strict`: verify 失敗 → step failed (`error=VerifyMismatch`)
+- `advisory`: step success だが `verified=False` を結果に含める
+- `permissive`: log のみ
+
+step result には常に `verify` フィールドが追加される:
+
+```json
+{
+  "command": "set_voltage", "success": true, "verified": true,
+  "verify": {
+    "readback_command": "measure_voltage",
+    "expected": 5.0, "actual": 5.001, "tolerance": 0.05,
+    "attempts": 1, "status": "ok"
+  }
+}
+```
+
+### state_query 実行 (`src/visa_mcp/state_query.py`)
+
+`query_state_item` / `query_all_state` を新設。`get_state` / `get_last_measurement` /
+`describe_instrument` 内で共通利用。`value_path` / `map` 対応。
+
+### executor hook (job_events 記録)
+
+Recipe / Group / Map Job 実行で下記イベントを `job_events` に時系列保存:
+
+- `job_started` / `job_completed` / `job_failed` (既に transition_status で記録、
+  追加で payload を保存)
+- `step_started` / `step_completed` / `step_failed` (job_steps テーブルにも
+  詳細レコード)
+- `target_started` / `target_completed` / `target_failed`
+  (`target_runs` テーブル UPSERT、Group/Map で targets 全てに対し)
+- `monitor_stop_condition_met`
+
+`record_event` / `record_step_started` / `record_step_completed` /
+`upsert_target_run` API を `JobStore` に追加。例外は握りつぶす (永続化失敗で
+Job 実行を止めない設計)。
+
+### Monitor Job (`start_monitor_job`)
+
+`JobManager.start_monitor_job` を新設。polling core (`_do_one_poll`) を再利用
+しつつ、`MonitorJobExecutor` 経路で:
+
+- `interval_s >= 1.0` / `duration_s <= 86400` (24h) / 最大 10 万サンプル制限
+- 各 poll の値を `monitor_data` に時系列保存
+- `stop_condition_expr` で条件成立による早期終了
+- cancel_job 対応 (slice sleep で即応)
+- `runtime.current_progress` に `samples / elapsed_s / remaining_s / last_value`
+
+Monitor Job も Job 系として扱われるため、`get_job_status` / `cancel_job` /
+`list_jobs` がそのまま使える。時系列データは `get_monitor_data` で別取得。
+
+### スコープ外 (v0.7.1 以降)
+
+- 文字列 verify (現状は数値のみ)
+- audit log の完全 SQLite 統合 (現状は既存 `audit.log` に並行記録)
+- `locks` テーブル
+- target 単位 resource acquire/release への移行
+  (引き続き親 Map Job 全体一括 lock、v0.7.0 では現行設計を維持)
+- backend-independent コード分離 (docs 明記のみ)
+- monitor の retention policy (現状は手動で削除)
+- `cancel_running_on_policy_stop` / `retry_safe_shutdown_before_retry`
+  (v0.6.0.1 から引き続き予約)
+
+### テスト (16 件追加、合計 313 passed)
+
+`tests/test_persistence_verify_v070.py`:
+
+**必須 3 件**:
+- `test_schema_migration_from_v050` (v0.5.x DB を v0.7.0 起動で migration、
+  既存 jobs データ保持 + 新規 5 テーブル作成)
+- `test_verify_numeric_mismatch_strict_fails_step` (strict mode で verify 失敗
+  時に `error=VerifyMismatch` で step failed)
+- `test_job_events_record_step_and_target` (Recipe Job で job_events に
+  step_started / step_completed が記録される、job_steps テーブルにも entry)
+
+その他:
+- `test_schema_init_fresh_db`
+- `test_target_runs_recorded_for_map_job`
+- `test_verify_numeric_success` / `test_verify_numeric_mismatch_advisory_warns_only`
+- `test_query_state_item_basic` / `test_query_state_item_with_map` /
+  `test_query_all_state`
+- `test_measurement_cache_upsert_and_get`
+- `test_monitor_records_data` / `test_monitor_stop_condition` /
+  `test_monitor_cancel`
+- `test_monitor_interval_validation` / `test_monitor_duration_validation`
+
+### 後方互換
+
+既存 25 MCP ツール / v0.6.1.1 YAML / v0.5.x SQLite DB はすべて不変。
+新規追加は YAML の **オプション** (`verify` / `state_query`) と新規ツールのみ。
+v0.5.x の DB を持つユーザーは初回起動時に自動 migration される (jobs データ
+は保持)。
+
+---
+
 ## v0.6.1.1 — 外部レビュー対応 (P0/P1)
 
 v0.6.1 公開後の外部レビューで指摘された P0 二件 + P1 数件への対応。

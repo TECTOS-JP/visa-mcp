@@ -20,6 +20,29 @@ class ReturnDefinition(BaseModel):
     format: str = ""                       # v0.3.0: response_formats のキーを参照
 
 
+class VerifyConfig(BaseModel):
+    """v0.7.0: write 系コマンドの read-back 検証設定
+
+    `readback_command` で指定された query 系コマンドを write 直後に実行し、
+    write した args[*] と read 値を比較する。strict mode では不一致を step failed
+    として扱う。
+
+    比較は数値のみ (v0.7.0 MVP)。文字列比較は v0.7.1 以降。
+    """
+    readback_command: str
+    # read-back の値と write の args[<key>] を比較する際のキー名。
+    # 省略時は write の主 parameter (最初の数値型) を自動推定。
+    arg_key: str = ""
+    # 比較トレランス (絶対値)。
+    tolerance: float = 0.0
+    # 不一致時の再 read-back 回数。0 で 1 回のみ。
+    retry: int = 1
+    # retry 間 sleep (s)
+    delay_s: float = 0.2
+    # read-back response から数値を取り出すパス (CommandStep.value_path と同様)
+    value_path: str = ""
+
+
 class CommandDefinition(BaseModel):
     scpi: str
     type: Literal["query", "write"] = "query"
@@ -32,6 +55,8 @@ class CommandDefinition(BaseModel):
     # True の場合のみ、polling wait の command として推奨される。
     # False/未指定の場合は polling 可能だが警告メッセージに含められる。
     polling_safe: bool = False
+    # v0.7.0: write 後の read-back 検証 (write 系コマンドのみ意味あり)
+    verify: VerifyConfig | None = None
 
 
 class IdentificationConfig(BaseModel):
@@ -52,6 +77,21 @@ class ConnectionConfig(BaseModel):
     read_termination: str = "\n"
     write_termination: str = "\n"
     serial: SerialConfig = Field(default_factory=SerialConfig)
+
+
+class StateQueryItem(BaseModel):
+    """v0.7.0: 状態 query 1 件の定義
+
+    `command` は CommandDefinition の名前 (query 系)。
+    `unit` は表示用 (実機は単位変換しない)。
+    `value_path` は parsed response から数値を取り出すフィールド名。
+    `map` は raw 文字列を表示値に変換する辞書 (例: {"1": "ON", "0": "OFF"})。
+    """
+    command: str
+    unit: str = ""
+    value_path: str = ""
+    map: dict[str, str] = Field(default_factory=dict)
+    description: str = ""
 
 
 class MetadataConfig(BaseModel):
@@ -314,6 +354,8 @@ class InstrumentDefinition(BaseModel):
     # 指定がない場合は JobManager._best_effort_safe_shutdown が
     # set_output OFF / set_voltage 0 を試みる (power_supply 系のみ妥当)。
     safe_shutdown: list[RecipeStep] = Field(default_factory=list)
+    # v0.7.0 追加: get_state / describe_instrument が参照する状態 query 一覧
+    state_query: dict[str, StateQueryItem] = Field(default_factory=dict)
 
     @property
     def display_name(self) -> str:

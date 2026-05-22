@@ -12,6 +12,7 @@ from visa_mcp.tools import discovery, commands, pdf_extractor, info, recipes
 from visa_mcp.tools import jobs as jobs_tools
 from visa_mcp.tools import waits as waits_tools
 from visa_mcp.tools import groups as groups_tools
+from visa_mcp.tools import monitor as monitor_tools
 from visa_mcp.job import JobManager
 from visa_mcp.system_config import SystemConfig
 from visa_mcp.bus_manager import BusManager
@@ -76,11 +77,14 @@ job_mgr = JobManager(visa_mgr, session_mgr, system_config=_system_config)
 
 discovery.register_tools(mcp, session_mgr)
 commands.register_tools(mcp, session_mgr)
-info.register_tools(mcp, session_mgr)
+# v0.7.0: info に visa / job_mgr を渡すと describe_instrument / get_state /
+# get_last_measurement も登録される
+info.register_tools(mcp, session_mgr, visa=visa_mgr, job_mgr=job_mgr)
 recipes.register_tools(mcp, session_mgr)
 jobs_tools.register_tools(mcp, job_mgr)
 waits_tools.register_tools(mcp, job_mgr)
 groups_tools.register_tools(mcp, job_mgr)
+monitor_tools.register_tools(mcp, job_mgr)
 pdf_extractor.register_tools(mcp)
 
 

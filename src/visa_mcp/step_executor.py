@@ -1,23 +1,16 @@
 """
 個別 Step の実行ロジック (v0.5.0.1 で recipe_executor.py から切り出し)
 
-各 Step 型を実機 / VISA に対して 1 回実行する関数群。
-Recipe / Job / (将来の Group / DSL) executor から共通して使われる public API。
-
-- execute_command_step: 機器の名前付きコマンドを 1 回実行 (安全制約 + パラメータ検証 + SCPI 送信)
-- execute_wait_step: 単純秒待機 (cancel 非対応; Job で cancel ありの wait は job/manager.py 側に持つ)
-
-v0.5.0.1 リファクタの動機:
-recipe_executor.py 内に `_execute_*` の prefix で定義されていたが、
-job/manager.py から外部 import されていたため、命名が誤解を招いていた。
-public API として切り出し、import 経路を統一した。
+v0.7.0: write 系 command に対し verify (read-back) を組み込む。
 """
 from __future__ import annotations
 import asyncio
 import logging
+from typing import Any
 
 from . import safety as sf
 from .experiment_ir import CommandStep, WaitStep
+from .models.instrument_def import VerifyConfig
 from .session_manager import InstrumentSession
 from .utils.param_validator import validate_and_build_scpi, ParameterValidationError
 from .visa_manager import VisaManager, VisaError
@@ -127,12 +120,33 @@ async def execute_command_step(
                 write_termination=conn.write_termination,
             )
             session.record_command(step.command)
-            return {
+            # v0.7.0: verify (write 後 read-back)
+            verify_info: dict[str, Any] | None = None
+            verified_ok = True
+            if cmd_def.verify is not None:
+                verify_info = await _do_verify(
+                    visa, session, step, cmd_def.verify, resolved_args,
+                )
+                verified_ok = verify_info.get("verified", False)
+            base = {
                 "command": step.command,
                 "args": resolved_args,
                 "scpi_sent": scpi,
                 "success": True,
             }
+            if verify_info is not None:
+                base["verified"] = verified_ok
+                base["verify"] = verify_info
+                if not verified_ok and mode == "strict":
+                    # strict mode: verify 失敗を step failed として扱う
+                    base["success"] = False
+                    base["error"] = "VerifyMismatch"
+                    base["message"] = (
+                        f"verify 失敗 (strict): expected={verify_info.get('expected')}, "
+                        f"actual={verify_info.get('actual')}, "
+                        f"tolerance={verify_info.get('tolerance')}"
+                    )
+            return base
     except VisaError as e:
         return {
             "command": step.command,
@@ -140,3 +154,198 @@ async def execute_command_step(
             "error": type(e).__name__,
             "message": str(e),
         }
+
+
+# ============================================================
+# v0.7.0: verify (read-back)
+# ============================================================
+
+
+def _extract_numeric_for_verify(
+    raw: str, parsed: dict | None, value_path: str,
+) -> float | None:
+    """verify 用に read-back response から数値を抽出。
+
+    polling_executor.extract_value と同じロジックを採用 (簡易版)。
+    """
+    if value_path and parsed and value_path in parsed:
+        try:
+            return float(parsed[value_path])
+        except (TypeError, ValueError):
+            pass
+    if parsed and "value" in parsed:
+        try:
+            return float(parsed["value"])
+        except (TypeError, ValueError):
+            pass
+    if parsed:
+        numeric = []
+        for k, v in parsed.items():
+            try:
+                float(v)
+                numeric.append(k)
+            except (TypeError, ValueError):
+                pass
+        if len(numeric) == 1:
+            try:
+                return float(parsed[numeric[0]])
+            except (TypeError, ValueError):
+                pass
+    try:
+        return float(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+async def _do_verify(
+    visa: VisaManager,
+    session: InstrumentSession,
+    write_step: CommandStep,
+    verify_cfg: VerifyConfig,
+    resolved_args: dict[str, Any],
+) -> dict[str, Any]:
+    """write 直後の read-back 比較を実施。
+
+    返り値:
+      {
+        "verified": bool,
+        "readback_command": str,
+        "expected": float | None,
+        "actual": float | None,
+        "tolerance": float,
+        "attempts": int,
+        "status": "ok" | "mismatch" | "readback_failed",
+        "message"?: str,
+      }
+    """
+    from .response_parser import parse_response
+
+    # expected: arg_key 指定 or 最初の数値 args を採用
+    expected: float | None = None
+    if verify_cfg.arg_key and verify_cfg.arg_key in resolved_args:
+        try:
+            expected = float(resolved_args[verify_cfg.arg_key])
+        except (TypeError, ValueError):
+            pass
+    if expected is None:
+        for v in resolved_args.values():
+            try:
+                expected = float(v)
+                break
+            except (TypeError, ValueError):
+                pass
+
+    rb_cmd_def = session.definition.commands.get(verify_cfg.readback_command)
+    if rb_cmd_def is None:
+        return {
+            "verified": False, "readback_command": verify_cfg.readback_command,
+            "expected": expected, "actual": None, "tolerance": verify_cfg.tolerance,
+            "attempts": 0, "status": "readback_failed",
+            "message": (
+                f"verify.readback_command '{verify_cfg.readback_command}' が "
+                f"機器定義に存在しません"
+            ),
+        }
+    if rb_cmd_def.type != "query":
+        return {
+            "verified": False, "readback_command": verify_cfg.readback_command,
+            "expected": expected, "actual": None, "tolerance": verify_cfg.tolerance,
+            "attempts": 0, "status": "readback_failed",
+            "message": (
+                f"readback_command '{verify_cfg.readback_command}' は query 型である必要があります"
+            ),
+        }
+
+    max_retry = max(0, int(verify_cfg.retry))
+    delay_s = max(0.0, float(verify_cfg.delay_s))
+    conn = session.definition.connection
+    rb_timeout_ms = rb_cmd_def.timeout_ms or conn.default_timeout_ms
+
+    actual: float | None = None
+    last_raw = ""
+    attempts = 0
+    while attempts <= max_retry:
+        attempts += 1
+        try:
+            rb_scpi = rb_cmd_def.scpi
+            last_raw = await visa.query(
+                session.resource_name, rb_scpi, timeout_ms=rb_timeout_ms,
+                read_termination=conn.read_termination,
+                write_termination=conn.write_termination,
+            )
+        except VisaError as e:
+            if attempts > max_retry:
+                return {
+                    "verified": False,
+                    "readback_command": verify_cfg.readback_command,
+                    "expected": expected, "actual": None,
+                    "tolerance": verify_cfg.tolerance,
+                    "attempts": attempts, "status": "readback_failed",
+                    "message": f"VisaError on read-back: {e}",
+                }
+            if delay_s > 0:
+                await asyncio.sleep(delay_s)
+            continue
+
+        parsed: dict | None = None
+        if rb_cmd_def.returns and rb_cmd_def.returns.format:
+            fmt = session.definition.response_formats.get(rb_cmd_def.returns.format)
+            if fmt is not None:
+                p = parse_response(last_raw, fmt)
+                if p.get("matched"):
+                    parsed = p.get("fields") or {}
+
+        actual = _extract_numeric_for_verify(last_raw, parsed, verify_cfg.value_path)
+        if actual is None:
+            if attempts > max_retry:
+                return {
+                    "verified": False,
+                    "readback_command": verify_cfg.readback_command,
+                    "expected": expected, "actual": None,
+                    "tolerance": verify_cfg.tolerance,
+                    "attempts": attempts, "status": "readback_failed",
+                    "message": f"read-back から数値を抽出できません (raw={last_raw!r})",
+                }
+            if delay_s > 0:
+                await asyncio.sleep(delay_s)
+            continue
+
+        # 比較
+        if expected is None:
+            # 比較不可 (write が数値 args を持たない等) → "ok" 扱い (info のみ)
+            return {
+                "verified": True,
+                "readback_command": verify_cfg.readback_command,
+                "expected": None, "actual": actual,
+                "tolerance": verify_cfg.tolerance,
+                "attempts": attempts, "status": "ok",
+                "message": "expected が抽出できないため比較スキップ",
+            }
+        if abs(actual - expected) <= verify_cfg.tolerance:
+            return {
+                "verified": True,
+                "readback_command": verify_cfg.readback_command,
+                "expected": expected, "actual": actual,
+                "tolerance": verify_cfg.tolerance,
+                "attempts": attempts, "status": "ok",
+            }
+        # mismatch → retry
+        if attempts > max_retry:
+            return {
+                "verified": False,
+                "readback_command": verify_cfg.readback_command,
+                "expected": expected, "actual": actual,
+                "tolerance": verify_cfg.tolerance,
+                "attempts": attempts, "status": "mismatch",
+            }
+        if delay_s > 0:
+            await asyncio.sleep(delay_s)
+
+    # ここに来ることは無いが安全側 fallback
+    return {
+        "verified": False,
+        "readback_command": verify_cfg.readback_command,
+        "expected": expected, "actual": actual,
+        "tolerance": verify_cfg.tolerance,
+        "attempts": attempts, "status": "mismatch",
+    }

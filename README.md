@@ -70,7 +70,7 @@ Claude に話しかける：
 >
 > 「USB0::0x... を identify_instrument で識別して、5V 出力するように設定してください」
 
-## 提供される MCP ツール（25 個 / raw 系は別途オプトイン）
+## 提供される MCP ツール（31 個 / raw 系は別途オプトイン）
 
 ### 識別・情報
 
@@ -115,6 +115,17 @@ Claude に話しかける：
 | `list_experiment_units` | `experiment_units` 一覧 |
 | `start_group_query_job` | グループ全機器に同じ query を並列実行 |
 | `start_map_recipe_job` | 異なる条件で各 unit に recipe を並列実行 (100 サンプル等) |
+
+### **状態・モニタ (self-awareness + persistence)** ★v0.7.0 新規
+
+| ツール | 用途 |
+|-------|------|
+| `describe_instrument` | 機器の能力サマリ (identity / capabilities / state_keys / recommended_usage) |
+| `get_state` | `state_query` 定義に従って機器の現在状態を取得 (cache 対応) |
+| `get_last_measurement` | 測定値キャッシュから最新値 (古ければ自動再取得) |
+| `start_monitor` | 機器を定期測定する Monitor Job を起動 (`monitor_data` に保存) |
+| `stop_monitor` | Monitor Job を停止 |
+| `get_monitor_data` | Monitor の時系列データを取得 (大量データ向け別ツール) |
 
 ### 取り込み
 

@@ -37,6 +37,8 @@ from visa_mcp.polling_executor import (
     execute_wait_until,
     execute_wait_for_condition,
     execute_wait_for_stable,
+    _do_one_poll,
+    POLL_SLEEP_SLICE_S,
 )
 from visa_mcp.session_manager import SessionManager
 from visa_mcp.visa_manager import VisaManager
@@ -147,6 +149,24 @@ class JobManager:
         return self._scheduler
 
     # ---------- public API ----------
+
+    def _safe_record_event(
+        self,
+        job_id: str,
+        event_type: str,
+        *,
+        target_id: str | None = None,
+        step_index: int | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> None:
+        """job_events 記録のラッパー (例外を握りつぶす)"""
+        try:
+            self._store.record_event(
+                job_id, event_type, target_id=target_id,
+                step_index=step_index, payload=payload,
+            )
+        except Exception as e:
+            logger.debug("record_event 失敗 (event=%s): %s", event_type, e)
 
     async def start_recipe_job(
         self,
@@ -571,6 +591,323 @@ class JobManager:
             self._runtimes.pop(job_id, None)
 
     # =====================================================================
+    # v0.7.0: Monitor ジョブ
+    # =====================================================================
+
+    # monitor の制限 (実装方針 #14)
+    _MONITOR_MIN_INTERVAL_S: float = 1.0
+    _MONITOR_MAX_DURATION_S: float = 86400.0  # 24h
+    _MONITOR_MAX_SAMPLES: int = 100_000
+
+    async def start_monitor_job(
+        self,
+        instrument: str,
+        command_name: str,
+        *,
+        interval_s: float = 5.0,
+        duration_s: float = 600.0,
+        stop_condition_expr: str | None = None,
+        value_path: str | None = None,
+        args: dict[str, Any] | None = None,
+        owner: str = "",
+        queue_policy: QueuePolicy = "queue",
+    ) -> JobRecord:
+        """v0.7.0: 定期測定する Monitor Job を起動。
+
+        各 poll の値は SQLite `monitor_data` に保存され、`get_monitor_data` で
+        取得可能。`stop_condition_expr` が指定された場合は条件成立で早期終了。
+
+        interval_s >= 1.0 / duration_s <= 86400 / 最大 100k サンプル
+        """
+        args = args or {}
+        # validation
+        if interval_s < self._MONITOR_MIN_INTERVAL_S:
+            return self._record_immediate_failure(
+                resource_name=instrument, recipe_name=f"<monitor:{command_name}>",
+                parameters={"interval_s": interval_s},
+                error_class="validation",
+                summary=(
+                    f"interval_s={interval_s} は最小 {self._MONITOR_MIN_INTERVAL_S}s 以上必要"
+                ),
+            )
+        if duration_s <= 0 or duration_s > self._MONITOR_MAX_DURATION_S:
+            return self._record_immediate_failure(
+                resource_name=instrument, recipe_name=f"<monitor:{command_name}>",
+                parameters={"duration_s": duration_s},
+                error_class="validation",
+                summary=(
+                    f"duration_s は 0 < x <= {self._MONITOR_MAX_DURATION_S} (24h) "
+                    f"の範囲: {duration_s}"
+                ),
+            )
+
+        # alias を resource に解決
+        resource = self._system_config.resolve_alias(instrument) or instrument
+        session = self._sessions.get_session(resource)
+        if session is None or session.definition is None:
+            return self._record_immediate_failure(
+                resource_name=resource, recipe_name=f"<monitor:{command_name}>",
+                parameters={"instrument": instrument},
+                error_class="not_found",
+                summary=f"{instrument} (→ {resource}) は未識別です",
+            )
+        cmd_def = session.definition.commands.get(command_name)
+        if cmd_def is None or cmd_def.type != "query":
+            return self._record_immediate_failure(
+                resource_name=resource, recipe_name=f"<monitor:{command_name}>",
+                parameters={"command": command_name},
+                error_class="validation",
+                summary=(
+                    f"command '{command_name}' は query 型である必要があります"
+                ),
+            )
+
+        # Job 登録
+        job_id = self._new_job_id()
+        rec = self._store.create_job(
+            job_id=job_id, owner=owner,
+            resource_name=resource,
+            recipe=f"<monitor:{instrument}.{command_name}>",
+            parameters={
+                "instrument": instrument,
+                "command": command_name,
+                "interval_s": interval_s,
+                "duration_s": duration_s,
+                "stop_condition": stop_condition_expr,
+                "value_path": value_path,
+                "args": args,
+            },
+        )
+
+        # scheduler 投入 (monitor 中は resource 占有)
+        required_resources = [resource]
+        try:
+            immediate, blocking = await self._scheduler.enqueue(
+                job_id, required_resources, queue_policy=queue_policy,
+            )
+        except ResourceBusyError as e:
+            return self._store.transition_status(
+                job_id, JobStatus.FAILED,
+                error_class="blocked",
+                last_step_summary=f"resource busy (blocked by {e.blocking_job_id})",
+                result={
+                    "success": False, "error": "ResourceBusy",
+                    "message": str(e), "blocking_job_id": e.blocking_job_id,
+                },
+            )
+
+        deadline = time.monotonic() + duration_s
+
+        task = asyncio.create_task(
+            self._run_monitor(
+                rec, session, command_name, args,
+                interval_s, duration_s, stop_condition_expr, value_path,
+                required_resources=required_resources,
+                start_immediately=immediate,
+            ),
+            name=f"job-{job_id}",
+        )
+        self._runtimes[job_id] = _JobRuntime(task, deadline)
+        if not immediate:
+            self._store.update_step(
+                job_id, -1,
+                last_step_summary=f"queued, blocked_by={blocking}",
+            )
+        return rec
+
+    async def _run_monitor(
+        self,
+        rec: JobRecord,
+        session,
+        command_name: str,
+        args: dict[str, Any],
+        interval_s: float,
+        duration_s: float,
+        stop_condition_expr: str | None,
+        value_path: str | None,
+        *,
+        required_resources: list[str],
+        start_immediately: bool,
+    ) -> None:
+        """Monitor Job の bg 実行"""
+        job_id = rec.job_id
+        try:
+            if not start_immediately:
+                await self._wait_until_scheduled(job_id)
+            await self._scheduler.on_running(job_id)
+
+            runtime = self._runtimes.get(job_id)
+            if runtime is None:
+                return
+            current = self._store.get(job_id)
+            if current is not None and is_terminal(current.status):
+                return
+
+            self._store.transition_status(job_id, JobStatus.RUNNING, current_step_index=0)
+            self._store.record_event(
+                job_id, "job_started",
+                payload={"type": "monitor", "instrument": session.resource_name,
+                         "command": command_name, "interval_s": interval_s,
+                         "duration_s": duration_s},
+            )
+
+            from visa_mcp.utils.condition import safe_eval_condition, ConditionError
+
+            t0 = time.monotonic()
+            deadline = t0 + duration_s
+            samples = 0
+            consecutive_errors = 0
+            max_consecutive_errors = 3
+            stopped_by_condition = False
+            last_value: Any = None
+
+            while True:
+                # cancel / timeout チェック
+                if runtime.cancel_mode is not None:
+                    break
+                now = time.monotonic()
+                if now >= deadline:
+                    break
+                # 1 poll
+                value, raw, _parsed, error_kind = await _do_one_poll(
+                    self._visa, session, command_name, args, None, value_path,
+                )
+                if error_kind is not None:
+                    consecutive_errors += 1
+                    if consecutive_errors >= max_consecutive_errors:
+                        self._store.transition_status(
+                            job_id, JobStatus.FAILED,
+                            error_class="hardware",
+                            last_step_summary=(
+                                f"monitor: {consecutive_errors} 連続失敗 ({error_kind})"
+                            ),
+                            result={
+                                "success": False, "error": "MonitorPollErrorExceeded",
+                                "samples_recorded": samples,
+                                "last_error_kind": error_kind,
+                            },
+                        )
+                        return
+                else:
+                    consecutive_errors = 0
+                    last_value = value
+                    samples += 1
+                    try:
+                        self._store.append_monitor_data(
+                            monitor_id=job_id,
+                            instrument=session.resource_name,
+                            value=value,
+                            sample_count=samples,
+                        )
+                    except Exception as e:
+                        logger.warning("monitor_data append 失敗: %s", e)
+                    # 上限到達
+                    if samples >= self._MONITOR_MAX_SAMPLES:
+                        break
+                    # stop_condition 評価
+                    if stop_condition_expr:
+                        try:
+                            if safe_eval_condition(
+                                stop_condition_expr, {"value": value},
+                            ):
+                                stopped_by_condition = True
+                                self._store.record_event(
+                                    job_id, "monitor_stop_condition_met",
+                                    payload={
+                                        "value": value,
+                                        "condition_expr": stop_condition_expr,
+                                    },
+                                )
+                                break
+                        except ConditionError as e:
+                            self._store.transition_status(
+                                job_id, JobStatus.FAILED,
+                                error_class="validation",
+                                last_step_summary=f"stop_condition error: {e}",
+                                result={"success": False, "error": "ConditionError"},
+                            )
+                            return
+
+                # progress 更新 (公開用)
+                self._update_progress(runtime, {
+                    "type": "monitor",
+                    "samples": samples,
+                    "elapsed_s": time.monotonic() - t0,
+                    "remaining_s": max(0.0, deadline - time.monotonic()),
+                    "last_value": last_value,
+                    "interval_s": interval_s,
+                })
+
+                # slice sleep で cancel 即応
+                remaining_sleep = interval_s
+                while remaining_sleep > 0:
+                    if runtime.cancel_mode is not None or runtime.is_timed_out():
+                        break
+                    chunk = min(remaining_sleep, POLL_SLEEP_SLICE_S)
+                    await asyncio.sleep(chunk)
+                    remaining_sleep -= chunk
+                if runtime.cancel_mode is not None:
+                    break
+
+            elapsed = time.monotonic() - t0
+            # 終端判定
+            if runtime.cancel_mode is not None:
+                self._safe_transition(job_id, JobStatus.CANCELLING)
+                self._store.transition_status(
+                    job_id, JobStatus.CANCELLED,
+                    error_class="cancelled",
+                    last_step_summary=f"monitor cancelled at {samples} samples",
+                    result={
+                        "success": False, "cancelled": True,
+                        "samples_recorded": samples, "elapsed_s": elapsed,
+                    },
+                )
+            else:
+                self._store.transition_status(
+                    job_id, JobStatus.COMPLETED,
+                    last_step_summary=(
+                        f"monitor completed: {samples} samples"
+                        + (" (stop condition met)" if stopped_by_condition else "")
+                    ),
+                    result={
+                        "success": True,
+                        "samples_recorded": samples,
+                        "elapsed_s": elapsed,
+                        "stopped_by_condition": stopped_by_condition,
+                        "last_value": last_value,
+                    },
+                )
+
+        except asyncio.CancelledError:
+            self._safe_transition(job_id, JobStatus.CANCELLING)
+            try:
+                self._store.transition_status(
+                    job_id, JobStatus.CANCELLED,
+                    error_class="cancelled",
+                    last_step_summary="monitor cancelled (immediate)",
+                    result={"success": False, "cancelled": True},
+                )
+            except Exception:
+                pass
+            raise
+        except Exception as e:
+            logger.exception("monitor job %s で予期しないエラー", job_id)
+            self._store.transition_status(
+                job_id, JobStatus.FAILED,
+                error_class="internal",
+                last_step_summary=f"unexpected: {e}",
+                result={"success": False, "error": "InternalError", "message": str(e)},
+            )
+        finally:
+            try:
+                next_jobs = await self._scheduler.on_terminal(job_id, required_resources)
+                for nj_id in next_jobs:
+                    self._wake_queued_job(nj_id)
+            except Exception:
+                pass
+            self._runtimes.pop(job_id, None)
+
+    # =====================================================================
     # v0.6.0: Group / Map ジョブ
     # =====================================================================
 
@@ -942,6 +1279,61 @@ class JobManager:
                 )
                 return
 
+            # v0.7.0: target_runs 初期化
+            for t in targets:
+                try:
+                    self._store.upsert_target_run(
+                        job_id, t.target_id, "queued",
+                        required_resources=t.required_resources,
+                        bindings=dict(t.bindings),
+                        parameters=dict(t.parameters),
+                        is_start=False,
+                    )
+                except Exception:
+                    pass
+
+            self._safe_record_event(
+                job_id, "job_started",
+                payload={
+                    "type": "group_or_map",
+                    "recipe": rec.recipe,
+                    "target_count": len(targets),
+                    "concurrency": concurrency,
+                },
+            )
+
+            def _on_event(event_type: str, payload: dict) -> None:
+                tid = payload.get("target_id")
+                # target_runs 反映
+                try:
+                    if event_type == "target_started":
+                        self._store.upsert_target_run(
+                            job_id, tid, "running", is_start=True,
+                        )
+                    elif event_type == "target_completed":
+                        self._store.upsert_target_run(
+                            job_id, tid, "ok",
+                            result={
+                                "attempts": payload.get("attempts"),
+                                "elapsed_s": payload.get("elapsed_s"),
+                            },
+                        )
+                    elif event_type == "target_failed":
+                        self._store.upsert_target_run(
+                            job_id, tid,
+                            payload.get("status", "failed"),
+                            error={
+                                "error_class": payload.get("error_class"),
+                                "attempts": payload.get("attempts"),
+                                "elapsed_s": payload.get("elapsed_s"),
+                            },
+                        )
+                except Exception:
+                    pass
+                self._safe_record_event(
+                    job_id, event_type, target_id=tid, payload=payload,
+                )
+
             try:
                 summary_dict = await executor.run(
                     targets,
@@ -949,6 +1341,7 @@ class JobManager:
                     failure_policy=policy,
                     cancel_check=lambda: self._poll_cancel_reason(runtime),
                     on_progress=lambda p: self._update_progress(runtime, p),
+                    on_event=_on_event,
                 )
             finally:
                 runtime.current_progress = None
@@ -1267,6 +1660,12 @@ class JobManager:
 
         # running へ
         self._store.transition_status(job_id, JobStatus.RUNNING, current_step_index=0)
+        # v0.7.0: job_events に開始記録
+        self._safe_record_event(
+            job_id, "job_started",
+            payload={"type": "recipe", "recipe": rec.recipe,
+                     "step_count": len(plan.steps)},
+        )
 
         step_results: list[dict] = []
 
@@ -1289,6 +1688,21 @@ class JobManager:
                 self._store.update_step(
                     job_id, idx,
                     last_step_summary=self._step_summary(step),
+                )
+                # v0.7.0: step_started イベント + job_steps エントリ
+                step_type = getattr(step, "type", "?")
+                step_row_id = 0
+                try:
+                    step_row_id = self._store.record_step_started(
+                        job_id, idx, step_type,
+                    )
+                except Exception:
+                    pass
+                self._safe_record_event(
+                    job_id, "step_started",
+                    step_index=idx,
+                    payload={"step_type": step_type,
+                             "summary": self._step_summary(step)},
                 )
 
                 # WaitStep は専用パス (cancel/timeout に即応)
@@ -1337,6 +1751,24 @@ class JobManager:
                     }
 
                 step_results.append({"step": idx, **result})
+                # v0.7.0: step_completed / step_failed 記録
+                try:
+                    self._store.record_step_completed(
+                        step_row_id,
+                        status="ok" if result.get("success") else "failed",
+                        result=result if result.get("success") else None,
+                        error=result if not result.get("success") else None,
+                    )
+                except Exception:
+                    pass
+                self._safe_record_event(
+                    job_id,
+                    "step_completed" if result.get("success") else "step_failed",
+                    step_index=idx,
+                    payload={"step_type": step_type,
+                             "verified": result.get("verified"),
+                             "error": result.get("error")},
+                )
 
                 if not result.get("success", False):
                     # wait の timeout 中断 → TIMEOUT 終端へ

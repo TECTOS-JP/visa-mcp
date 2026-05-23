@@ -219,10 +219,13 @@ def test_extension_package_strict_rejects_missing_readme(tmp_path):
     """pack に README.md が無くて --strict → strict_missing_pack_readme"""
     pack = tmp_path / "noreadme"
     pack.mkdir()
+    # v1.6: catalog があるが README.md が無い状態を作る
+    # (catalog が無いと strict_missing_catalog_* errors が先に出るため)
     (pack / "extension.yaml").write_text(
         "extension_id: t.nr\nname: x\nversion: 0.1.0\ntype: definition_pack\n"
         "stability: { support_level: tested, executable_code: false }\n"
-        "contents:\n  instruments: [ instruments/x.yaml ]\n",
+        "contents:\n  instruments: [ instruments/x.yaml ]\n"
+        "catalog:\n  summary: nr pack\n  license: MIT\n",
         encoding="utf-8",
     )
     (pack / "instruments").mkdir()

@@ -309,6 +309,11 @@ def install_definition_pack(
         "visa_mcp_version": _current_visa_mcp_version(),
         "checksums": checksums,
         "manifest": manifest,
+        # v1.6: installed_from で install 元を構造化記録
+        "installed_from": {
+            "kind": "directory",
+            "source_path": str(src),
+        },
     }
     (install_path / ".install_meta.json").write_text(
         json.dumps(meta, ensure_ascii=False, indent=2),
@@ -333,6 +338,174 @@ def install_definition_pack(
 
     result.status = "ok"
     return result
+
+
+def install_definition_pack_from_zip(
+    zip_path: str | Path,
+    *,
+    force: bool = False,
+    extensions_dir: Path | None = None,
+    lockfile_path: Path | None = None,
+    skip_verify: bool = False,
+) -> InstallResult:
+    """v1.6.0: definition pack zip (.visa-mcp-ext.zip) を install。
+
+    Steps:
+      1. verify_extension_package() を必ず通す (skip_verify は test 用のみ)
+         - zip slip / 絶対 path / checksum / executable_code 検査
+         - extension.yaml の再 validate も内部で行われる
+      2. zip を **tmp directory に展開**
+      3. extension.yaml が tmp 内に出てくることを確認
+      4. tmp 内 extension.yaml を `install_definition_pack` に流す
+         (既存の install フローを再利用、source_path は zip path を記録)
+
+    v1.6 では **remote URL / 署名 / trust store は未対応**。
+    `zip_path` は **local file path** のみ。
+    """
+    import tempfile
+    import zipfile
+
+    result = InstallResult(status="error")
+    zp = Path(zip_path).expanduser()
+    if not zp.exists():
+        result.errors.append({
+            "error_class": "not_found",
+            "message": f"package zip not found: {zp}",
+        })
+        return result
+    if not zp.is_file():
+        result.errors.append({
+            "error_class": "validation",
+            "message": f"package zip path is not a file: {zp}",
+            "details": {"sub_class": "extension_install_zip_invalid"},
+        })
+        return result
+
+    # 1. verify-package
+    if not skip_verify:
+        from visa_mcp.extension_packaging import verify_extension_package
+        vrep = verify_extension_package(zp)
+        if vrep.status == "error":
+            # verify エラーを install エラーとして返却
+            for e in vrep.errors:
+                result.errors.append({
+                    "error_class": e.get("error_class", "validation"),
+                    "message": "(verify) " + str(e.get("message", "")),
+                    "details": e.get("details") or {},
+                })
+            result.errors.append({
+                "error_class": "validation",
+                "message": "package verification failed; install aborted",
+                "details": {"sub_class": "extension_install_zip_verify_failed"},
+            })
+            return result
+        # warning は伝搬
+        for w in vrep.warnings:
+            result.warnings.append({
+                "warning_class": w.get("warning_class", "warning"),
+                "message": "(verify) " + str(w.get("message", "")),
+                "details": w.get("details") or {},
+            })
+
+    # 2. tmp extract
+    #    安全 path のみ展開する (二重防御。verify-package で zip slip は
+    #    既に弾いているが、skip_verify=True の場合に備える)
+    tmpdir = Path(tempfile.mkdtemp(prefix="visa-mcp-zipinstall-"))
+    try:
+        try:
+            with zipfile.ZipFile(zp, "r") as zf:
+                for name in zf.namelist():
+                    if name.endswith("/"):
+                        continue
+                    # zip slip 二重 check
+                    n = name.replace("\\", "/")
+                    if (n.startswith("/") or any(p == ".." for p in n.split("/"))
+                            or (len(n) >= 2 and n[1] == ":")):
+                        result.errors.append({
+                            "error_class": "package_zip_slip",
+                            "message": (
+                                f"zip member path 安全性違反: {name!r}"
+                            ),
+                            "details": {"path": name,
+                                        "sub_class":
+                                            "extension_install_zip_unsafe"},
+                        })
+                        return result
+                    target = tmpdir / n
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    with zf.open(name) as src_f, open(target, "wb") as dst_f:
+                        dst_f.write(src_f.read())
+        except zipfile.BadZipFile as e:
+            result.errors.append({
+                "error_class": "package_invalid_zip",
+                "message": f"zip として読めない: {e}",
+            })
+            return result
+
+        # 3. extension.yaml が tmp 内にあるか
+        manifest = tmpdir / "extension.yaml"
+        if not manifest.exists():
+            result.errors.append({
+                "error_class": "not_found",
+                "message": "zip 内に extension.yaml が無い",
+                "details": {
+                    "sub_class": "extension_install_zip_no_manifest",
+                },
+            })
+            return result
+
+        # 4. 既存の install_definition_pack に流す
+        inner = install_definition_pack(
+            manifest,
+            force=force,
+            extensions_dir=extensions_dir,
+            lockfile_path=lockfile_path,
+        )
+        # source_path を zip 自身に書き換え (metadata 上の追跡性のため)
+        if inner.status == "ok" and inner.metadata is not None:
+            inner.metadata["source_path"] = str(zp)
+            inner.metadata["source_format"] = "visa-mcp-extension-package"
+            # v1.6: installed_from を package 由来として記録
+            try:
+                zip_sha = hashlib.sha256(zp.read_bytes()).hexdigest()
+            except Exception:
+                zip_sha = ""
+            pkg_format_version = None
+            # zip 内 package_manifest.json から format_version を拾う
+            try:
+                import zipfile as _zipfile
+                with _zipfile.ZipFile(zp, "r") as _zf:
+                    if "package_manifest.json" in _zf.namelist():
+                        _pkg = json.loads(
+                            _zf.read("package_manifest.json").decode("utf-8")
+                        )
+                        pkg_format_version = _pkg.get(
+                            "package_format_version")
+            except Exception:
+                pass
+            inner.metadata["installed_from"] = {
+                "kind": "package",
+                "package_path": str(zp),
+                "package_sha256": zip_sha,
+                "package_format_version": pkg_format_version,
+            }
+            # .install_meta.json も書き直す
+            try:
+                (Path(inner.install_path) / ".install_meta.json").write_text(
+                    json.dumps(inner.metadata, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+            except Exception as e:
+                logger.warning(
+                    "could not update .install_meta.json source_path: %s",
+                    e,
+                )
+        # warnings を継承
+        if result.warnings:
+            inner.warnings = list(result.warnings) + list(inner.warnings)
+        return inner
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 def list_installed_packs(

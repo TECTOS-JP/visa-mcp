@@ -20,6 +20,24 @@ from pydantic import BaseModel, Field, field_validator
 SUPPORT_LEVELS = ("verified", "tested", "experimental", "draft")
 
 
+class ExtensionCatalog(BaseModel):
+    """v1.6: catalog metadata (任意)。pack の選定 / 比較に使う。
+
+    `extension.yaml` の root `catalog:` field として記述する。schema
+    レベルではすべて optional。`extension package --strict` で
+    `summary` / `license` 空は warning。
+    """
+    summary: str = ""
+    description: str = ""
+    authors: list[dict[str, Any]] = Field(default_factory=list)
+    license: str = ""
+    homepage: str = ""
+    tags: list[str] = Field(default_factory=list)
+    categories: list[str] = Field(default_factory=list)
+    target_users: list[str] = Field(default_factory=list)
+    safety_notes: list[str] = Field(default_factory=list)
+
+
 class ExtensionContents(BaseModel):
     """definition pack の中身ファイル参照 (extension.yaml からの相対 path)。
     すべて optional だが、少なくとも 1 セクションが非空である必要がある。
@@ -77,6 +95,8 @@ class ExtensionManifest(BaseModel):
     license: str = ""
     contents: ExtensionContents = Field(default_factory=ExtensionContents)
     stability: ExtensionStability = Field(default_factory=ExtensionStability)
+    # v1.6: catalog metadata (任意)。pack の選定 / 比較用。
+    catalog: ExtensionCatalog = Field(default_factory=ExtensionCatalog)
 
     @field_validator("extension_id")
     @classmethod
@@ -333,10 +353,29 @@ def validate_extension_file(
 
     rep.files_checked = files_checked
 
+    # v1.6: catalog metadata の存在 (任意)。normal では warning、
+    # strict では error。pack 選定 / registry 掲載で重要な field のみ。
+    cat = manifest.catalog
+    if not cat.summary:
+        rep.warnings.append({
+            "warning_class": "missing_catalog_summary",
+            "message": "catalog.summary が空。pack 選定時に概要が表示されない",
+            "field_path": "catalog.summary",
+        })
+    if not cat.license:
+        rep.warnings.append({
+            "warning_class": "missing_catalog_license",
+            "message": "catalog.license が空 (root level の license も推奨)",
+            "field_path": "catalog.license",
+        })
+
     # v1.4: strict mode promotion
     if strict:
-        # empty_contents / registry_entries_format warning → error
-        promote_classes = {"empty_contents", "registry_entries_format"}
+        # empty_contents / registry_entries_format / catalog warning → error
+        promote_classes = {
+            "empty_contents", "registry_entries_format",
+            "missing_catalog_summary", "missing_catalog_license",
+        }
         remaining_warnings: list[dict[str, Any]] = []
         for w in rep.warnings:
             if w.get("warning_class") in promote_classes:

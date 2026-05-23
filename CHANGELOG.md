@@ -1,5 +1,147 @@
 # 変更履歴
 
+## v1.6.0 — Definition Pack Discovery / Catalog Metadata + Local zip install
+
+合言葉: **「package できる」を「どの pack を使うべきか判断できる」に繋ぐ**
+(同時に「そのまま install できる」も実装)
+
+v1.5 までで pack の作成・配布・整合性確認は揃った。v1.6 では (1) 選定 /
+比較のための **catalog metadata + discovery CLI**、(2) `.visa-mcp-ext.zip`
+からの **local zip install**、を CLI に追加する。
+提案の「実用優先」path を採用し、両方を同 release に含める。
+
+### 新規 MCP ツール: **ゼロ** (Stable 43 / Experimental 7 / 合計 50 不変)
+
+### 新規 CLI subcommands
+
+```bash
+visa-mcp extension catalog [--installed | --packages <dir>] [--json]
+visa-mcp extension inspect-package <zip-path> [--json]
+visa-mcp extension install <path-to-pack.visa-mcp-ext.zip>   # 拡張子 auto-route
+```
+
+### Catalog / Discovery (主テーマ)
+
+#### `extension.yaml` の `catalog` field (v1.6 新規、任意)
+
+```yaml
+catalog:
+  summary: "..."           # 1 行紹介。strict で空 → error
+  description: "..."       # 詳細紹介
+  authors: [{name: "..."}]
+  license: "MIT"           # SPDX 推奨。strict で空 → error
+  homepage: "https://..."
+  tags: [...]
+  categories: [...]
+  target_users: [...]
+  safety_notes: [...]
+```
+
+すべて optional。`extension package --strict` で `summary` / `license`
+空は error。
+
+#### 新規 module `src/visa_mcp/extension_catalog.py`
+
+- `support_level_summary(pack_dir, instrument_rels)` →
+  `{verified, tested, experimental, draft}` 件数
+- `quality_signals(manifest, pack_dir, *, package_verified=None,
+  strict_validation_passed=None)` → **数値 score を返さず**、
+  boolean / count の構造化シグナル (`has_readme`,
+  `has_catalog_summary`, `has_validation_evidence`, `*_instruments`
+  等)
+- `list_catalog_installed(...)` → installed pack を catalog 形式で
+  一覧化
+- `list_catalog_packages(dist_dir)` → `.visa-mcp-ext.zip` を catalog
+  形式で一覧化
+- `inspect_package(zip)` → install せずに zip 中身の catalog /
+  contents / signals / package_manifest を返す (軽量読み取り)
+
+#### 設計判断: score 化しない
+
+`quality_signals` は **boolean / count のみ**。`quality_score: 85`
+のような数値は返さない (提案 P4)。
+
+- 評価基準が未成熟
+- AI エージェントが数値を過信しやすい
+- 単一 score は「なぜそうなったか」を隠す
+
+各次元独立 signal で「何が足りないか」を直接読み取らせる。
+
+### `installed_from` (v1.6 新規、`.install_meta.json`)
+
+install 元を構造化記録。
+
+| 値 | 意味 |
+|----|------|
+| `{kind: "directory", source_path}` | extension.yaml から直接 install |
+| `{kind: "package", package_path, package_sha256, package_format_version}` | .visa-mcp-ext.zip から install |
+
+後の audit / bundle で「この pack はどの配布物から入れたか」を辿る。
+
+### Local zip install (実用優先 path)
+
+`visa-mcp extension install` が `.zip` (`.visa-mcp-ext.zip` 含む) を
+受け付ける。CLI は **拡張子で auto-route**:
+- `.zip` → zip install 経路 (新規)
+- それ以外 → 従来の extension.yaml 経路
+
+#### 新規 API: `install_definition_pack_from_zip(...)`
+
+Flow:
+1. `verify_extension_package()` を必ず通す (zip slip / 絶対 path /
+   checksum / executable_code / re-validate)。`skip_verify` は test
+   のみ。
+2. zip を tmp directory に展開 (二重 zip-slip check)
+3. tmp 内 `extension.yaml` を既存 `install_definition_pack()` フロー
+   に流す
+4. `.install_meta.json.source_path` を **zip path** に書き換え、
+   `source_format: "visa-mcp-extension-package"` と
+   `installed_from.kind: "package"` を追加記録
+
+### 新規 docs
+
+- **`docs/extension_catalog.md`**: catalog metadata 仕様 / CLI 役割分担 /
+  quality_signals の設計判断 / installed_from / v1.7+ ロードマップ
+- `docs/extension_install.md`: v1.6 zip install フロー追記
+- `docs/extension_packaging.md`: v1.6 で zip install 対応済み旨を追記
+
+### 新規 error_class / warning_class
+
+新規 error_class:
+- `extension_install_zip_invalid`
+- `extension_install_zip_verify_failed`
+- `extension_install_zip_unsafe`
+- `extension_install_zip_no_manifest`
+- `strict_missing_catalog_summary`
+- `strict_missing_catalog_license`
+
+新規 warning_class:
+- `missing_catalog_summary`
+- `missing_catalog_license`
+- `installed_pack_unreadable`
+- `package_unreadable`
+- `package_missing_manifest`
+
+### 互換性
+
+- `catalog` field は **完全 optional** (default 空)。既存 pack は無修正
+  で動く
+- `install_definition_pack(extension.yaml)` の signature / 挙動は不変
+- `.install_meta.json`: 既存 field は不変、`source_format` /
+  `installed_from` は追加 (consumer が無視できる)
+- 既存 v1.5.x install 済み pack はそのまま check / inspect /
+  uninstall / catalog 可
+- Stable 43 / Experimental 7 / 合計 50 不変
+
+### v1.6 で受け付けない (v1.7+ 候補)
+
+- remote URL / git からの install
+- remote registry / pull CLI
+- quality **score** 化 (signals に留める方針継続)
+- signature / trust store / 公開鍵検証
+- automatic update
+- Python plugin / entry_points discovery
+
 ## v1.5.1 — v1.5.0 レビュー応答 (CLI help / docs 明確化 / overlay 反映テスト)
 
 合言葉: **「package できる」を、迷わず使えるようにする**

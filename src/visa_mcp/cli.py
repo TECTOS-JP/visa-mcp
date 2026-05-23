@@ -1,5 +1,5 @@
 """
-v1.5: visa-mcp CLI
+v1.6: visa-mcp CLI
 
 Usage:
   visa-mcp validate instrument <path>
@@ -10,6 +10,7 @@ Usage:
   visa-mcp validate schemas
   visa-mcp validate extension <path-to-extension.yaml> [--strict]   # v1.2 / strict v1.4
   visa-mcp extension install <path-to-extension.yaml>      # v1.3
+  visa-mcp extension install <path-to-pack.visa-mcp-ext.zip>  # v1.6
   visa-mcp extension list [--json]                         # v1.3
   visa-mcp extension uninstall <extension_id> [--dry-run]  # v1.3 / dry-run v1.4
   visa-mcp extension validate-installed [--json]           # v1.3
@@ -18,6 +19,8 @@ Usage:
   visa-mcp extension package <extension.yaml>              # v1.5
       [--output <dir>] [--strict] [--json]
   visa-mcp extension verify-package <zip-path> [--json]    # v1.5
+  visa-mcp extension catalog [--installed | --packages <dir>]  # v1.6
+  visa-mcp extension inspect-package <zip-path> [--json]   # v1.6
   visa-mcp registry overlay [--source builtin|extension]   # v1.4
   visa-mcp serve
 
@@ -183,9 +186,19 @@ def build_parser() -> argparse.ArgumentParser:
     ext_sub = ext.add_subparsers(dest="ext_command", required=True)
 
     ext_install = ext_sub.add_parser(
-        "install", help="extension.yaml を local user 領域へ install",
+        "install",
+        help=(
+            "extension.yaml または .visa-mcp-ext.zip を local user 領域へ "
+            "install (v1.6 で zip にも対応)"
+        ),
     )
-    ext_install.add_argument("path", help="extension.yaml の path")
+    ext_install.add_argument(
+        "path",
+        help=(
+            "extension.yaml の path、または "
+            ".visa-mcp-ext.zip / *.zip の path (v1.6+)"
+        ),
+    )
     ext_install.add_argument(
         "--force", action="store_true",
         help="同 extension_id が既存でも上書き install",
@@ -285,6 +298,38 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ext_pkg.set_defaults(func=cmd_extension)
 
+    # v1.6: catalog (installed / package directory)
+    ext_cat = ext_sub.add_parser(
+        "catalog",
+        help=(
+            "(v1.6) installed pack または package directory を catalog "
+            "形式で一覧化 (選定 / 比較用)"
+        ),
+    )
+    grp = ext_cat.add_mutually_exclusive_group()
+    grp.add_argument(
+        "--installed", action="store_true",
+        help="installed pack を catalog 化 (default)",
+    )
+    grp.add_argument(
+        "--packages", default=None, metavar="DIR",
+        help="指定 directory 配下の .visa-mcp-ext.zip を catalog 化",
+    )
+    ext_cat.add_argument("--json", action="store_true")
+    ext_cat.set_defaults(func=cmd_extension)
+
+    # v1.6: inspect-package (install せずに zip 中身を読む)
+    ext_ip = ext_sub.add_parser(
+        "inspect-package",
+        help=(
+            "(v1.6) zip package を install せずに catalog / contents / "
+            "quality_signals を表示"
+        ),
+    )
+    ext_ip.add_argument("zip_path", help="検査対象の .visa-mcp-ext.zip")
+    ext_ip.add_argument("--json", action="store_true")
+    ext_ip.set_defaults(func=cmd_extension)
+
     # v1.5: verify-package
     ext_vp = ext_sub.add_parser(
         "verify-package",
@@ -354,12 +399,27 @@ def cmd_extension(args: argparse.Namespace) -> int:
     sub = args.ext_command
 
     if sub == "install":
-        res = install_definition_pack(args.path, force=args.force)
+        # v1.6: zip path も受け付ける (.visa-mcp-ext.zip / .zip)
+        src = Path(args.path)
+        is_zip = src.suffix.lower() == ".zip" or src.name.endswith(
+            ".visa-mcp-ext.zip"
+        )
+        if is_zip:
+            from visa_mcp.extension_install import (
+                install_definition_pack_from_zip,
+            )
+            res = install_definition_pack_from_zip(
+                args.path, force=args.force,
+            )
+            schema_name = "extension_install_zip (v1.6)"
+        else:
+            res = install_definition_pack(args.path, force=args.force)
+            schema_name = "extension_install (v1.3)"
         data = res.to_dict()
         return _emit_extension({
             "status": data["status"],
             "file": str(args.path),
-            "schema": "extension_install (v1.3)",
+            "schema": schema_name,
             "errors": data["errors"],
             "warnings": data["warnings"],
             "extension_id": data["extension_id"],
@@ -494,6 +554,82 @@ def cmd_extension(args: argparse.Namespace) -> int:
                 print(f"  WARN  {w.get('warning_class')}: "
                       f"{w.get('message')}")
         return 0 if rep["integrity"] != "invalid" else 1
+
+    if sub == "catalog":
+        from visa_mcp.extension_catalog import (
+            list_catalog_installed, list_catalog_packages,
+        )
+        if args.packages:
+            rep = list_catalog_packages(args.packages)
+        else:
+            rep = list_catalog_installed()
+        data = rep.to_dict()
+        if args.json:
+            print(json.dumps({"catalog": data}, ensure_ascii=False,
+                              indent=2, default=str))
+        else:
+            icon = {"ok": "[OK]", "warning": "[WARN]",
+                    "error": "[ERR]"}.get(data["status"], "[?]")
+            print(f"{icon} catalog  count={data['count']}")
+            for e in data["extensions"]:
+                sl = e.get("support_level_summary") or {}
+                qs = e.get("quality_signals") or {}
+                print(f"  - {e['extension_id']} v{e['version']}")
+                summ = (e.get("catalog") or {}).get("summary", "")
+                if summ:
+                    print(f"      summary: {summ}")
+                print(f"      support_level: "
+                      f"verified={sl.get('verified', 0)} "
+                      f"tested={sl.get('tested', 0)} "
+                      f"experimental={sl.get('experimental', 0)} "
+                      f"draft={sl.get('draft', 0)}")
+                print(f"      signals: readme={qs.get('has_readme')} "
+                      f"license={qs.get('has_catalog_license')} "
+                      f"evidence={qs.get('has_validation_evidence')}")
+            for e in data["errors"]:
+                print(f"  ERROR  {e.get('error_class')}: "
+                      f"{e.get('message')}")
+            for w in data["warnings"]:
+                print(f"  WARN   {w.get('warning_class')}: "
+                      f"{w.get('message')}")
+        return 0 if data["status"] != "error" else 1
+
+    if sub == "inspect-package":
+        from visa_mcp.extension_catalog import inspect_package
+        data = inspect_package(args.zip_path)
+        if args.json:
+            print(json.dumps({"inspect_package": data},
+                              ensure_ascii=False, indent=2, default=str))
+        else:
+            if data["status"] == "error":
+                print(f"[ERR] {args.zip_path}")
+                for e in data["errors"]:
+                    print(f"  ERROR  {e.get('error_class')}: "
+                          f"{e.get('message')}")
+                return 1
+            e = data["entry"]
+            sl = e.get("support_level_summary") or {}
+            qs = e.get("quality_signals") or {}
+            print(f"[OK] {e['extension_id']} v{e['version']}")
+            cat = e.get("catalog") or {}
+            if cat.get("summary"):
+                print(f"  summary    : {cat['summary']}")
+            if cat.get("license"):
+                print(f"  license    : {cat['license']}")
+            if cat.get("tags"):
+                print(f"  tags       : {cat['tags']}")
+            print(f"  contents   : {e.get('contents_summary')}")
+            print(f"  support_lvl: "
+                  f"verified={sl.get('verified', 0)} "
+                  f"tested={sl.get('tested', 0)} "
+                  f"experimental={sl.get('experimental', 0)} "
+                  f"draft={sl.get('draft', 0)}")
+            print(f"  signals    : readme={qs.get('has_readme')} "
+                  f"evidence={qs.get('has_validation_evidence')}")
+            for w in data.get("warnings", []):
+                print(f"  WARN   {w.get('warning_class')}: "
+                      f"{w.get('message')}")
+        return 0
 
     if sub == "package":
         from visa_mcp.extension_packaging import package_definition_pack

@@ -21,3 +21,26 @@ contents:
 stability:
   support_level: tested
   executable_code: false
+
+# v1.6: catalog metadata (任意) - pack 選定 / 比較用
+catalog:
+  summary: "Mock PSU/DMM definitions + 1 benchmark task for visa-mcp."
+  description: >
+    Reference definition pack used by visa-mcp tests and as a starting
+    template for external contributors. No real hardware I/O.
+  authors:
+    - { name: "visa-mcp" }
+  license: "MIT"
+  homepage: "https://github.com/TECTOS-JP/visa-mcp"
+  tags:
+    - mock
+    - benchmark
+    - reference
+  categories:
+    - instrument-definitions
+    - benchmarks
+  target_users:
+    - developers
+    - benchmark-authors
+  safety_notes:
+    - "Mock instruments only. No real hardware I/O."

@@ -185,20 +185,36 @@ pack directory 内の `package_manifest.json` / `checksums.sha256` は
 
 ## v1.5 で対応しない (v1.6+ 候補)
 
-- **zip からの install** (`visa-mcp extension install <zip>`) ── v1.6 候補
+- ~~**zip からの install**~~ ── **v1.6 で対応済み** (下記参照)
 - remote URL / git からの install
 - registry pull CLI
 - signature / trust store / 公開鍵検証
 - automatic update
 - Python plugin / entry_points discovery
 
-順序としては:
+順序:
 
 ```
-v1.5: package 作成 / 検証          ← 本リリース
-v1.6: local zip install (検討)
+v1.5: package 作成 / 検証
+v1.6: local zip install (本リリース)     ← v1.6 で完了
 v1.7+: remote registry / signature (慎重に判断)
 ```
+
+## v1.6: zip からの install
+
+v1.6 では `visa-mcp extension install` が `.zip` (主に
+`.visa-mcp-ext.zip`) を受け付ける。詳細は
+[`extension_install.md`](extension_install.md#v16-zip-からの-install)
+参照。
+
+```bash
+visa-mcp extension package ./mypack/extension.yaml --output dist/
+visa-mcp extension install dist/tectos.mock.basic-0.1.0.visa-mcp-ext.zip
+```
+
+zip install は内部で `verify_extension_package()` を必ず通すため、
+checksum mismatch / zip slip / `executable_code=true` は install 段階
+で弾かれる。
 
 ## 関連 docs
 

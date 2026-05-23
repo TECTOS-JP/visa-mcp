@@ -131,6 +131,45 @@ bundle を共有する場合、受け取り側は:
 
 これにより「途中で 1 行書き換わった」のような改ざんを検出できる。
 
+## `plan.json` の optional 扱い (v1.1.1 明記)
+
+`plan.json` は **DSL Job (`start_experiment_job` 由来) でのみ** bundle に
+含まれる。Recipe job / Group / Map / wait job などの非 DSL Job では生成
+されないため、**bundle validation の必須ファイルから除外** されている。
+
+```text
+Required (always present):
+  manifest.json / job_record.json / timeline.jsonl /
+  results.jsonl / results.csv
+
+Optional (DSL job only):
+  plan.json / compiled_summary.json / job_summary.json
+
+Optional (include_* flag):
+  monitor_data.jsonl (include_monitor_data=true)
+  audit.jsonl        (include_audit=true)
+```
+
+`validate_experiment_bundle` は plan.json が無くても bundle_valid を判定
+できるが、`inspect_experiment_bundle` の `plan` フィールドは plan.json
+が無ければ `None`。
+
+## bundle inspection の zip 安全性 (v1.1.1 明記)
+
+`validate_experiment_bundle` / `inspect_experiment_bundle` は以下を保証:
+
+- **ファイルシステムへの展開は行わない** (`zipfile.ZipFile.read()` で
+  メモリ内のみ読み取り)
+- zip slip 的なファイル展開なし (展開しないため)
+- 不正な zip は `error_class=validation` + `details.sub_class=invalid_bundle_format` で拒否
+
+⚠ **未対応 (v1.x 開発予定)**:
+
+- zip bomb / 巨大ファイル読み取り上限 (v1.x 内で `max_file_size_mb` 設定を
+  検討、v1.2+ 候補)
+- 信頼できない bundle (例: 外部から受領した未署名 zip) を inspect する場合は、
+  別途 sandbox / リソース制限環境での実行を推奨
+
 ## experimental スコープ (v1.x)
 
 `export_experiment_bundle` は **experimental** ツール

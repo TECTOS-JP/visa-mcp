@@ -230,6 +230,15 @@ v1.x で禁止:
 
 以下は v1.0 stable に含まれない:
 
+> **`InstrumentBackend` Protocol** (v1.1 spike, `src/visa_mcp/backends/base.py`)
+> は public import 可能だが、**stable plugin API ではない**。
+> v1.1 では設計検討のための public class として公開しているのみで、
+> v1.x 内で Protocol 構造 / メソッド signature の破壊的変更があり得る。
+> 外部 plugin を書く場合は v1.2+ 以降の正式化を待つこと。
+> 詳細は [`docs/backend_abstraction.md`](backend_abstraction.md) Open questions
+> を参照。
+
+
 - benchmark runner internals (`src/visa_mcp/testing/`)
 - registry CLI internals (`visa-mcp validate` の出力詳細)
 - audit / locks 内部スキーマ

@@ -1,5 +1,70 @@
 # 変更履歴
 
+## v1.1.1 — v1.1 レビュー対応 (P0/P1/P2)
+
+v1.1.0 外部レビュー P0/P1/P2 対応。新規 MCP ツール無し、互換維持。
+
+### P0 確認
+
+- raw 改行: 該当 10 ファイル全て **LF only / CR=0 / 多行** で正常確認
+  (`tests/test_v111_review.py` の parametrized テストで CI 回帰防止)
+
+### P1 改修
+
+- **P1-2: `docs/bundle_export.md` に `plan.json` optional の説明追加**
+  - DSL Job 由来でのみ含まれる旨、required/optional ファイル一覧を表で明示
+- **P1-3: `inspect_experiment_bundle` レスポンスに `compatibility` 追加**
+  ```json
+  {
+    "compatibility": {
+      "bundle_version_supported": true,
+      "created_by_current_major_version": true,
+      "can_be_validated": true,
+      "can_be_replayed": false,
+      "reason": "Replay / import is not implemented in v1.1. ..."
+    }
+  }
+  ```
+  AI エージェントが誤って "replay できる" と解釈しないよう
+  `can_be_replayed: false` を明示。
+- **P1-4: bundle inspection の zip 安全性を docs 化**
+  - ファイルシステムへの展開は行わない (`ZipFile.read()` のみ)
+  - zip slip 不可 (展開しないため)
+  - zip bomb 上限は v1.2+ 候補として記録
+- **P1-5: `docs/backend_abstraction.md` に Open questions セクション追加**
+  - stateful session / timeout / binary transfer / encoding /
+    backend capability / mock-replay-simulator の収まり / error mapping
+    の 7 論点を v1.2+ 検討候補として記録
+- **P1-6: naming strategy の表現を緩和**
+  - 「v1.x 全期間で唯一」→ **「Default decision + Exception」** 構造に
+  - 再評価の余地を残しつつ default を明示
+- **P2-7: `docs/v1_stability_policy.md` に `InstrumentBackend` 注記**
+  - public import 可能だが **stable plugin API ではない** ことを明示
+  - 外部 plugin 利用者は v1.2+ 以降の正式化を待つよう案内
+
+### テスト
+
+`tests/test_v111_review.py` 27 件:
+
+- repo 10 ファイル × LF + multi-line (20 件)
+- bundle docs に plan.json optional / zip 安全性
+- backend docs に Open questions
+- naming strategy の Default decision / Exception
+- v1_stability_policy の InstrumentBackend 注記
+- `inspect_experiment_bundle` の compatibility field 存在 + 値
+
+`tests/test_v11.py::test_version_is_v1_1_0` を v1.1.x 系列許容に微調整。
+
+**合計 721 件 passing** (v1.1.0: 694 → v1.1.1: 721)
+
+### 互換性
+
+- 動作変更は `inspect_experiment_bundle` レスポンスに **新フィールド追加**
+  のみ (純粋追加、experimental スコープ)
+- Stable API 不変
+
+---
+
 ## v1.1.0 — Direction-setting release (naming / backend spike + bundle inspection)
 
 合言葉: **「分離するのではなく、分離できるかを判断できる状態にする」**

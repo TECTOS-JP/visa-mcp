@@ -4,7 +4,11 @@
 
 ## Current status
 
-`visa-mcp` を **v1.x 全期間で唯一の正式リポジトリ** として継続する。
+**Default decision for v1.x**: `visa-mcp` を唯一の正式リポジトリとして継続する。
+
+**Exception**: 後述の「Decision criteria」が複数同時に満たされ、利用者向け
+deprecation / migration plan を 1 リリース以上で予告できる場合に限り、
+v1.x 内でも分割を **再評価** する余地を残す (v1.1.1 で表現を緩和)。
 
 - v1.0 で Stable / Experimental API 分類、Schema stable 化、reproducibility
   bundle MVP までを安定化済み

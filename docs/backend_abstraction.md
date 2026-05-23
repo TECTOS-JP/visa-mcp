@@ -63,6 +63,26 @@ GUI runtime の影響を `visa-mcp` に持ち込まない)。
 - 抽象化を先に作ると、後から実装で噛み合わずに **抽象が間違っていた**
   ことに気付くケースが多い
 
+## Open questions (v1.1.1 追記、v1.2+ で再評価)
+
+Protocol を本格化する際の論点。**v1.1 では決定しない** が、検討候補として
+記録:
+
+| 論点 | 説明 |
+|------|------|
+| stateful session | `write` / `query` 単独だけで stateful な機器セッション (e.g. SCPI mode 設定が後続 query に影響する) を扱えるか。`open_resource` / `close_resource` を Protocol に持たせるか |
+| timeout / termination | `timeout_ms` / `read_termination` / `write_termination` を毎回引数で渡すのか、`open_resource` 時に固定するのか |
+| binary transfer | binary block / arbitrary binary read を Protocol で扱うか (現在は `str` 限定) |
+| encoding | UTF-8 以外の encoding (Shift-JIS 等の旧機器対応) を Protocol で表現するか |
+| backend capability | 各 backend が何をサポートするか (e.g. mock は polling 模擬可、replay は時系列順しか返せない、rest は async batch 可) を `capabilities` で公開するか |
+| mock / replay / simulator の自然な収まり | 同じ Protocol で「mock backend」「過去 bundle replay」「数式 simulator」が無理なく動くか。一部は専用 super-Protocol が要るかも |
+| error mapping | 各 backend 固有 error を `error_class=timeout` / `protocol` / `hardware` 等へどう正規化するか |
+
+これらが解決しないと、Protocol を v1.x 内で stable plugin API として
+公開するのは早い。**v1.1.1 時点では `InstrumentBackend` は spike / 設計
+検討用 public class** であり、stable plugin API ではない
+(`docs/v1_stability_policy.md` 参照)。
+
 ## 将来 backend 切り出しの判断基準
 
 `docs/naming_and_repository_strategy.md` と同じ条件:

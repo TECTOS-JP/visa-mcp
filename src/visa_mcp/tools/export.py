@@ -896,16 +896,29 @@ def register_tools(mcp: FastMCP, job_mgr: JobManager) -> None:
                 except Exception:
                     data["result_row_count"] = None
 
-            # compatibility warning
+            # compatibility judgment (v1.1.1: AI エージェントが誤って
+            # "replay できる" と解釈しないよう can_be_replayed=false を明示)
             warnings: list[dict] = []
             bv = (manifest or {}).get("bundle_version")
-            if bv not in SUPPORTED_BUNDLE_VERSIONS:
+            bv_supported = bv in SUPPORTED_BUNDLE_VERSIONS
+            if not bv_supported:
                 warnings.append({
                     "warning_class": "version_mismatch",
                     "message": (
                         f"bundle_version={bv!r} は現バージョン support 範囲外"
                     ),
                 })
+            data["compatibility"] = {
+                "bundle_version_supported": bv_supported,
+                "created_by_current_major_version": True,
+                "can_be_validated": True,
+                "can_be_replayed": False,
+                "reason": (
+                    "Replay / import is not implemented in v1.1. "
+                    "Use validate_experiment_bundle / inspect_experiment_bundle "
+                    "for analysis only."
+                ),
+            }
             data["warnings"] = warnings
         finally:
             zf.close()

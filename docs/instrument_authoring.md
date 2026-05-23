@@ -114,15 +114,62 @@ visa-mcp extension doctor my_pack/extension.yaml
 visa-mcp extension package my_pack/extension.yaml --dry-run
 ```
 
-## `manual_ref` の書き方推奨
+## `manual_ref` の書き方推奨 (v1.8.1 docs 補強)
+
+`metadata.manual_ref` は **str** field。registry 掲載 / PR review で
+出典確認の起点になる。最低限以下を含めると良い:
 
 ```yaml
 metadata:
-  manual_ref: "Kikusui PMX-A Programming Manual, Rev 1.05, pp.34-58"
+  # 推奨フォーマット (1 行)
+  manual_ref: "<vendor> <model> <doc title>, Rev <X.YZ>, pp.<NN-NN>"
 ```
 
-URL でも可。CONTRIBUTING.md のポリシー (manual / SCPI 表の出典明示)
-と一致。
+具体例:
+
+```yaml
+manual_ref: "Kikusui PMX-A Programming Manual, Rev 1.05, pp.34-58"
+manual_ref: "Keysight 34460A/34461A Programmer's Guide, Edition 5, MEASure subsystem"
+manual_ref: "Rigol DG1000Z Programming Guide, 2019-01, p.12 (BURSt)"
+manual_ref: "https://download.tek.com/manual/MDO3000-Programmer-Manual-EN.pdf p.45"
+```
+
+URL でも可。CONTRIBUTING.md のポリシー (manual / SCPI 表の出典明示 /
+NDA 内容を公開 PR に含めない) と一致。`scaffold` は生成時に
+`"TODO: URL or document title + revision + page range"` placeholder を
+入れるので、PR 前に必ず実体に置き換えること。
+
+## category 名 (v1.8.1 docs)
+
+CLI `--category` と instrument YAML `metadata.category` は **同じ値**:
+
+| CLI / metadata.category | 説明 |
+|-------------------------|------|
+| `power_supply` | プログラマブル電源 |
+| `dmm` | デジタルマルチメーター |
+| `temperature_meter` | 温度計 / データロガー |
+| `generic_scpi` | カテゴリ未確定 / 汎用 SCPI |
+
+v1.8.1 で `dmm` template の `metadata.category` を `multimeter` から
+`dmm` へ統一 (CLI 名と一致)。既存の `multimeter` 表記の instrument YAML
+を持つ pack は引き続き動くが、新規 scaffold は `dmm` で揃える。
+
+## `--force` の安全策 (v1.8.1)
+
+`instrument scaffold --force` で既存 YAML を上書きする場合、誤って
+手編集内容を消さないよう **`.bak-<UTC ts>` backup** が自動で作られる。
+
+```
+[OK] scaffold power_supply -> instruments/psu.yaml
+  WARN  instrument_scaffold_force_backup: --force: existing file backed
+        up to psu.yaml.bak-20260524T120000Z (remove manually after review)
+```
+
+backup file の cleanup は **手動**。review 後に不要なら削除すること。
+
+`extension add-instrument --force` も同様 (instrument YAML への backup
+は scaffold 層で行われる)。なお **registry id 重複は `--force` でも
+拒否**するポリシーは v1.8 から不変。
 
 ## `support_level` 昇格の目安
 

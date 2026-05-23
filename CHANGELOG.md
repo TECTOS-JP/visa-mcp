@@ -1,5 +1,76 @@
 # 変更履歴
 
+## v1.8.1 — v1.8.0 レビュー応答 (template 外部化 / dmm 統一 / .bak / rollback test)
+
+合言葉: **「template を読める形にし、authoring の事故を防ぐ」**
+
+v1.8.0 の external review (P0/P1) を反映した patch release。
+public API / 既存 CLI 引数 / `.install_meta.json` 形式すべて不変。
+**生成 YAML の出力は v1.8.0 と互換** (template 外部化は実装手段のみ変更)。
+
+### 変更点
+
+- **P0-1**: v1.8 関連 file 13 件 (src / docs / tests / CHANGELOG /
+  CONTRIBUTING + 4 つの新規 **`templates/instruments/<cat>.yaml`**) の
+  LF / multi-line を parametrized test 化 (`tests/test_v181_review.py`)
+- **P0-2**: 生成 YAML の multi-line + `yaml.safe_load` +
+  `validate_instrument_file` を **category ごと**に再保証
+  (power_supply は 80 行超、他は 25 行超)
+- **P1-3** (`src/visa_mcp/templates/instruments/`):
+  4 category template を **外部 YAML file 化**
+  (`power_supply.yaml` / `dmm.yaml` / `temperature_meter.yaml` /
+  `generic_scpi.yaml`)。Python 同梱の巨大文字列を撤廃。読み込みは
+  `importlib.resources` (Jinja2 依存なし)。置換は `str.replace` で
+  `{manufacturer}` / `{model}` の 2 placeholder のみ
+  (SCPI の `{voltage}` 等のブレースを壊さないため)。
+  `pyproject.toml [tool.hatch.build.targets.wheel.force-include]` で
+  wheel に同梱。
+- **P1-4** (`templates/instruments/dmm.yaml`):
+  `metadata.category` を **`multimeter` → `dmm`** へ統一 (CLI
+  `--category dmm` と同一値)。回帰防止 test:
+  `test_each_category_template_metadata_category_matches_cli`
+- **P1-5** (各 template `reset` description):
+  CAUTION 文言 (「device-specific behavior / Verify against manual」)
+  を追加。`power_supply.safety.cautions` にも
+  "Verify *RST behavior" を追記。
+- **P1-6** (`scaffold_instrument_definition`):
+  `--force` で既存 YAML を上書きする場合、**`.bak-<UTC ts>` backup**
+  を自動作成。`instrument_scaffold_force_backup` warning で報告。
+  backup cleanup は手動 (review 後に削除)。
+- **P1-7** (`tests/test_v181_review.py`):
+  `extension add-instrument` の rollback テストを強化:
+  - `test_rollback_restores_extension_yaml`
+  - `test_rollback_restores_registry_index`
+  - `test_rollback_removes_new_instrument_file`
+  - `test_rollback_preserves_existing_instrument_file` (--force 上書き
+    後の rollback で元内容に戻る)
+  monkeypatch で post-update validate を強制失敗させる手法。
+- **P1-8** (`docs/instrument_authoring.md`):
+  `manual_ref` 記入例 4 件 (Kikusui / Keysight / Rigol / URL) を追加。
+  category 統一の docs section、`--force` backup の挙動 docs も追加。
+
+### 新規 warning_class
+
+- `instrument_scaffold_force_backup`
+
+### 互換性
+
+- 生成 YAML 出力は v1.8.0 と等価 (template 内容を意図的に変更した
+  箇所: `dmm.category` 変更 / `reset.description` 強化 / `cautions`
+  追記 — いずれも instrument validation を error 0 で通る範囲)
+- `scaffold_instrument_definition` の signature 不変
+- `add_instrument_to_pack` の signature 不変
+- CLI 引数 / public API すべて不変
+- Stable 43 / Experimental 7 / 合計 50 不変
+
+### Wheel packaging
+
+`src/visa_mcp/templates/` 配下の YAML を wheel に同梱
+(`[tool.hatch.build.targets.wheel.force-include]`)。`pip install
+visa-mcp` 後も `instrument scaffold` が動く。
+
+---
+
 ## v1.8.0 — Instrument Definition Authoring
 
 合言葉: **「instrument YAML を作りやすくする」**

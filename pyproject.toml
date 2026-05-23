@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "visa-mcp"
-version = "1.8.0"
+version = "1.8.1"
 description = "MCP server for controlling GPIB / USB / Serial / LAN instruments via PyVISA. Define commands per-instrument with YAML."
 readme = "README.md"
 license = { text = "MIT" }
@@ -46,6 +46,9 @@ visa-mcp = "visa_mcp.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/visa_mcp"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"src/visa_mcp/templates" = "visa_mcp/templates"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

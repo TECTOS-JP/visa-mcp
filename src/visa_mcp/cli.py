@@ -243,6 +243,30 @@ def build_parser() -> argparse.ArgumentParser:
     ext_pkg = ext_sub.add_parser(
         "package",
         help="(v1.5) definition pack を配布可能 zip にまとめる",
+        description=(
+            "definition pack を <extension_id>-<version>.visa-mcp-ext.zip "
+            "にまとめる。zip 内に package_manifest.json と "
+            "checksums.sha256 を生成し、配布側で verify-package による "
+            "整合性検証を可能にする。"
+        ),
+        epilog=(
+            "例:\n"
+            "  visa-mcp extension package ./mypack/extension.yaml\n"
+            "  visa-mcp extension package ./mypack/extension.yaml "
+            "--output dist/\n"
+            "  visa-mcp extension package ./mypack/extension.yaml "
+            "--strict --json\n\n"
+            "strict mode:\n"
+            "  - support_level=verified で validation_evidence が空 "
+            "→ error\n"
+            "  - pack に README.md が無い → error\n"
+            "  - registry_entries の id/path/vendor/model/category/"
+            "support_level 必須\n"
+            "  - registry_entries.path が pack 外 → error\n"
+            "  - registry support_level と instrument metadata "
+            "support_level が不一致 → error"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     ext_pkg.add_argument("path", help="extension.yaml の path")
     ext_pkg.add_argument(
@@ -251,18 +275,48 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ext_pkg.add_argument(
         "--strict", action="store_true",
-        help="strict validation を通してから package 化",
+        help=(
+            "strict validation を通してから package 化 (registry 掲載 / CI / "
+            "release 前検査向け)"
+        ),
     )
-    ext_pkg.add_argument("--json", action="store_true")
+    ext_pkg.add_argument(
+        "--json", action="store_true", help="JSON 出力 (CI 向け)",
+    )
     ext_pkg.set_defaults(func=cmd_extension)
 
     # v1.5: verify-package
     ext_vp = ext_sub.add_parser(
         "verify-package",
         help="(v1.5) package zip の整合性を検証",
+        description=(
+            "package zip の整合性を検証する。zip slip / 絶対 path / "
+            "checksum mismatch / executable_code=true / "
+            "extension.yaml re-validation を全て通れば status=ok。"
+        ),
+        epilog=(
+            "例:\n"
+            "  visa-mcp extension verify-package "
+            "dist/tectos.mock.basic-0.1.0.visa-mcp-ext.zip\n"
+            "  visa-mcp extension verify-package dist/xxx.zip --json\n\n"
+            "検査項目:\n"
+            "  - zip として読める\n"
+            "  - すべての member が zip slip safe\n"
+            "  - extension.yaml / package_manifest.json / "
+            "checksums.sha256 必須\n"
+            "  - package_manifest.executable_code=true を error 化\n"
+            "  - checksums.sha256 と zip 内 sha256 を照合\n"
+            "  - package_manifest.files[*].sha256 と実 file を照合\n"
+            "  - tmp 展開して validate_extension_file を再実行"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    ext_vp.add_argument("zip_path", help="検証対象の .visa-mcp-ext.zip")
-    ext_vp.add_argument("--json", action="store_true")
+    ext_vp.add_argument(
+        "zip_path", help="検証対象の .visa-mcp-ext.zip path",
+    )
+    ext_vp.add_argument(
+        "--json", action="store_true", help="JSON 出力 (CI 向け)",
+    )
     ext_vp.set_defaults(func=cmd_extension)
 
     # v1.4: registry overlay

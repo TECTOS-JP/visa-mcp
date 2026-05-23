@@ -59,8 +59,31 @@ visa-mcp extension verify-package dist/xxx.zip --json
 }
 ```
 
-`executable_code` は v1.5 では **常に `false`**。v1.x では Python plugin
-を許可しないポリシーが続く。
+#### Field 仕様
+
+| Field | 型 | 説明 |
+|-------|----|------|
+| `package_format` | str | 固定値 `"visa-mcp-extension-package"`。verify-package は値域チェック |
+| `package_format_version` | str | SemVer 表記の package 形式バージョン。v1.5 では `"1.0"`。将来 field 追加時に minor up |
+| `extension_id` | str | extension.yaml の `extension_id` (reverse-DNS 推奨) |
+| `extension_version` | str | extension.yaml の `version` (SemVer) |
+| `created_at` | str | ISO8601 UTC、`+00:00` 付き |
+| `created_by` | str | `"visa-mcp <semver>"` 形式 (生成 CLI バージョン) |
+| `executable_code` | bool | **常に `false`**。`true` は verify-package で error。v1.x で Python plugin を許可しないポリシーが続く |
+| `file_count` | int | `files[]` の要素数 |
+| `files` | list | 各 file の `{path, sha256}` (path は zip 内 rel、sorted) |
+| `files[*].path` | str | zip 内 相対 path (POSIX `/` 区切り) |
+| `files[*].sha256` | str | sha256 hex digest (64 char) |
+| `checksums_file` | str | 固定値 `"checksums.sha256"` |
+| `checksums_sha256` | str | `checksums.sha256` 自身の sha256 (信頼の連鎖) |
+
+#### 後方互換ポリシー
+
+- `package_format_version` の **minor up** = field 追加のみ (既存
+  field の型 / 意味は変えない)。verify-package は未知の field を無視。
+- **major up** = breaking change。verify-package は `package_format_invalid`
+  に格上げする可能性あり。
+- v1.5 内では `1.0` を固定。
 
 ### checksums.sha256
 
@@ -107,6 +130,26 @@ pack directory 内の `package_manifest.json` / `checksums.sha256` は
 7. `package_manifest.files[*].sha256` と実 file を照合
    (`package_manifest_sha_mismatch`)
 8. tmp 展開後 `validate_extension_file()` を再実行
+
+## Normal vs Strict mode
+
+`package` / `verify-package` / `validate extension` の挙動を 1 表で。
+
+| 項目 | normal (default) | `--strict` |
+|------|------------------|------------|
+| 想定用途 | ローカル開発 / 動作確認 | **CI / registry 掲載 / release 前検査** |
+| `empty_contents` | warning | **error** (`strict_empty_contents`) |
+| `registry_entries_format` | warning | **error** (`strict_registry_entries_format`) |
+| 参照 instrument `support_level=draft` | warning | **error** (`strict_support_level_draft`) |
+| `support_level=verified` で `validation_evidence` 空 | (許容) | **error** (`strict_verified_requires_evidence`) |
+| `registry_entries[*]` の必須 field 欠落 | warning | **error** (`strict_registry_entry_missing_<field>`) |
+| `registry_entries[*].path` が pack 外 | (load_overlay で error) | **error** (`strict_registry_entry_path_outside_pack`) |
+| `registry_entries[*].support_level` と instrument metadata の不一致 | warning | **error** (`strict_registry_entry_support_level_mismatch`) |
+| pack に `README.md` 無し | warning (`missing_pack_readme`) | **error** (`strict_missing_pack_readme`) |
+| `extension_extra_file` (install 後) | warning | **error** (`extension check --strict`) |
+
+> 経験則: 開発中は normal でこまめに検証し、PR / tag 前に `--strict`
+> を 1 度通す。CI でも `--strict` を fail gate にするのが推奨。
 
 ## strict mode
 

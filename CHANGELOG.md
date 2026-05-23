@@ -1,5 +1,45 @@
 # 変更履歴
 
+## v1.5.1 — v1.5.0 レビュー応答 (CLI help / docs 明確化 / overlay 反映テスト)
+
+合言葉: **「package できる」を、迷わず使えるようにする**
+
+v1.5.0 の external review (主に docs / help / repo 品質) を反映した
+patch release。挙動・schema 変更なし。
+
+### 変更点
+
+- **P0**: v1.5 関連 file の LF / multi-line を parametrized test 化
+  (`tests/test_v151_review.py`)。新規 doc / module / schema を全カバー。
+- **P1-2** (`cli.py`):
+  - `extension package --help` / `extension verify-package --help` に
+    **使用例** (epilog) と **検査項目 / strict mode 説明**を追加
+  - `RawDescriptionHelpFormatter` で改行 / 箇条書きを保持
+  - 各 argument の help を強化 (用途例 / CI 用などを明記)
+- **P1-3** (`docs/extension_packaging.md`):
+  Normal vs Strict mode の **比較表**を section として追加。
+  10 行で `empty_contents` / `support_level=draft` /
+  `validation_evidence` / `README.md` / `registry_entries`
+  深掘り / `extension_extra_file` までを 1 望み。
+- **P1-4** (`docs/extension_packaging.md`):
+  `package_manifest.json` の **Field 仕様表** を追加 (型 / 説明)。
+  `package_format_version` の **後方互換ポリシー** (minor up = field
+  追加のみ / major up = breaking) も明記。
+- **P1-5** (`tests/test_v151_review.py`):
+  package → verify → 展開 → install → overlay registry に反映、
+  までの **end-to-end** テスト 2 本追加。
+  - 例 pack (registry_entries なし) → installed_extensions 反映
+  - registry_entries 付き pack → overlay に extension 由来 entry 出現
+    + `source.extension_id` / `extension_version` 整合
+
+### 互換性
+
+- public API / CLI 引数 / package 形式すべて不変
+- `package_format_version` は `"1.0"` のまま
+- Stable 43 / Experimental 7 / 合計 50 不変
+
+---
+
 ## v1.5.0 — Definition Pack Packaging / Publishing Preparation
 
 合言葉: **「作れる / install できる / 整合できる」→「配布可能な成果物として

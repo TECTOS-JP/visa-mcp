@@ -1,5 +1,68 @@
 {
   "$defs": {
+    "ExtensionCatalog": {
+      "description": "v1.6: catalog metadata (任意)。pack の選定 / 比較に使う。\n\n`extension.yaml` の root `catalog:` field として記述する。schema\nレベルではすべて optional。`extension package --strict` で\n`summary` / `license` 空は warning。",
+      "properties": {
+        "summary": {
+          "default": "",
+          "title": "Summary",
+          "type": "string"
+        },
+        "description": {
+          "default": "",
+          "title": "Description",
+          "type": "string"
+        },
+        "authors": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Authors",
+          "type": "array"
+        },
+        "license": {
+          "default": "",
+          "title": "License",
+          "type": "string"
+        },
+        "homepage": {
+          "default": "",
+          "title": "Homepage",
+          "type": "string"
+        },
+        "tags": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Tags",
+          "type": "array"
+        },
+        "categories": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Categories",
+          "type": "array"
+        },
+        "target_users": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Target Users",
+          "type": "array"
+        },
+        "safety_notes": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Safety Notes",
+          "type": "array"
+        }
+      },
+      "title": "ExtensionCatalog",
+      "type": "object"
+    },
     "ExtensionContents": {
       "description": "definition pack の中身ファイル参照 (extension.yaml からの相対 path)。\nすべて optional だが、少なくとも 1 セクションが非空である必要がある。",
       "properties": {
@@ -109,6 +172,9 @@
     },
     "stability": {
       "$ref": "#/$defs/ExtensionStability"
+    },
+    "catalog": {
+      "$ref": "#/$defs/ExtensionCatalog"
     }
   },
   "required": [

@@ -1,5 +1,70 @@
 # 変更履歴
 
+## v1.6.1 — v1.6.0 レビュー応答 (schema catalog / zip 上限 / verification status)
+
+合言葉: **「catalog を使う側」に必要な明確性と安全余白を足す**
+
+v1.6.0 の external review (P0/P1/P2) を反映した patch release。
+public API / 既存 schema / CLI 引数は不変。
+
+### 変更点
+
+- **P0**: v1.6 関連 file 18 件の LF / multi-line を parametrized test 化
+  (`tests/test_v161_review.py`)
+- **P1-2** (`schemas/extension_manifest.schema.json`):
+  schema 再生成で `catalog` property を反映 (Pydantic
+  `ExtensionManifest.catalog` から auto-emit)
+- **P1-3** (`examples/.../extension.yaml`):
+  multi-line layout を test で保証 + `yaml.safe_load` round-trip /
+  `catalog` block の dict 構造を test 化
+- **P1-4** (`extension_catalog.py::inspect_package`):
+  軽量 zip slip check 追加。`inspect_package_unsafe_member` warning
+- **P1-5** (`extension_install.py::install_definition_pack_from_zip`):
+  zip 構造制約を明示化:
+  - `extension.yaml` は zip root 直下必須
+    (`extension_install_zip_no_root_manifest`)
+  - file 数上限 5000 (`extension_install_zip_too_many_files`)
+  - uncompressed total 200 MB (`extension_install_zip_too_large`)
+  - tmp cleanup は `finally` で必ず実行 (旧来挙動を明文化)
+  - `docs/extension_install.md` に「zip 構造の要件」追加
+- **P1-6** (`extension_catalog.py::quality_signals`):
+  `null` の意味を明示する補助 field:
+  - `package_verification_status`: `"not_checked"` / `"verified"` /
+    `"failed"`
+  - `strict_validation_status`: `"not_checked"` / `"passed"` /
+    `"failed"`
+  既存 `*_passed` (true/false/None) は不変 (後方互換)
+- **P1-7** (`tests/test_v161_review.py`):
+  zip 由来 `installed_from.kind="package"` が
+  `extension catalog --installed` 経由で
+  `package_path` / `package_sha256` / `package_format_version` 付き
+  で取得できる E2E test
+- **P2-8** (`docs/extension_catalog.md`):
+  top-level `author` vs `catalog.authors` の役割対比表を追加。
+  v1.6+ は `catalog.authors` 推奨と明記
+- **P2-9** (`docs/error_taxonomy.md`):
+  v1.6 / v1.6.1 の **Zip install error 7 件**を新規 section、
+  Strict 表に `strict_missing_catalog_*` 追記
+
+### 新規 error_class
+
+- `extension_install_zip_no_root_manifest`
+- `extension_install_zip_too_many_files`
+- `extension_install_zip_too_large`
+
+### 新規 warning_class
+
+- `inspect_package_unsafe_member`
+
+### 互換性
+
+- `catalog` field は引き続き完全 optional
+- `quality_signals` の新 field 2 件は追加のみ (consumer 無視可)
+- `.install_meta.json` 形式 / CLI 引数 / public API signature 不変
+- Stable 43 / Experimental 7 / 合計 50 不変
+
+---
+
 ## v1.6.0 — Definition Pack Discovery / Catalog Metadata + Local zip install
 
 合言葉: **「package できる」を「どの pack を使うべきか判断できる」に繋ぐ**

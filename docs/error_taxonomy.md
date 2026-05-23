@@ -140,6 +140,18 @@ error_class。**MCP tool ではなく CLI JSON 出力上の error** であり、
 | `extension_checksum_unreadable` | `modified` |
 | `extension_file_missing` | `missing_file` |
 
+### Zip install (v1.6 / v1.6.1)
+
+| error_class | 意味 |
+|-------------|------|
+| `extension_install_zip_invalid` | zip path が file でない |
+| `extension_install_zip_verify_failed` | verify-package 段階で error |
+| `extension_install_zip_unsafe` | zip slip 二重 check で reject |
+| `extension_install_zip_no_manifest` | zip 内 extension.yaml 不在 |
+| `extension_install_zip_no_root_manifest` | zip **root** に extension.yaml なし (v1.6.1) |
+| `extension_install_zip_too_many_files` | file 数上限 5000 超 (v1.6.1) |
+| `extension_install_zip_too_large` | uncompressed total > 200MB (v1.6.1) |
+
 ### Strict validation (v1.4 / v1.4.1)
 
 `validate extension --strict` および `extension check --strict` 専用。
@@ -162,6 +174,8 @@ release 前検査向け)。`strict_` prefix で識別できる。
 | `strict_registry_entry_path_outside_pack` | (なし) |
 | `strict_registry_entry_support_level_mismatch` | warning |
 | `strict_extension_extra_file` | warning |
+| `strict_missing_catalog_summary` | warning (v1.6) |
+| `strict_missing_catalog_license` | warning (v1.6) |
 
 ### 関連 warning_class
 

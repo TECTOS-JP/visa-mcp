@@ -407,13 +407,64 @@ def install_definition_pack_from_zip(
                 "details": w.get("details") or {},
             })
 
-    # 2. tmp extract
+    # 2. tmp extract (v1.6.1 P1: size / count 上限を docs と合わせて確認)
+    #    - max files: 5000 (definition pack には十分)
+    #    - max uncompressed total: 200 MB
+    #    - extension.yaml が zip root にあること必須 (nested root 非対応)
     #    安全 path のみ展開する (二重防御。verify-package で zip slip は
     #    既に弾いているが、skip_verify=True の場合に備える)
+    _MAX_FILES = 5000
+    _MAX_TOTAL_BYTES = 200 * 1024 * 1024
     tmpdir = Path(tempfile.mkdtemp(prefix="visa-mcp-zipinstall-"))
     try:
         try:
             with zipfile.ZipFile(zp, "r") as zf:
+                # v1.6.1 P1: 全体 size / count を先に確認
+                infos = [i for i in zf.infolist() if not i.is_dir()]
+                if len(infos) > _MAX_FILES:
+                    result.errors.append({
+                        "error_class": "validation",
+                        "message": (
+                            f"zip 内 file 数が上限 {_MAX_FILES} 超 "
+                            f"({len(infos)})"
+                        ),
+                        "details": {
+                            "sub_class": "extension_install_zip_too_many_files",
+                            "count": len(infos),
+                            "limit": _MAX_FILES,
+                        },
+                    })
+                    return result
+                total = sum(i.file_size for i in infos)
+                if total > _MAX_TOTAL_BYTES:
+                    result.errors.append({
+                        "error_class": "validation",
+                        "message": (
+                            f"zip 内 uncompressed size が上限 "
+                            f"{_MAX_TOTAL_BYTES} 超 ({total} bytes)"
+                        ),
+                        "details": {
+                            "sub_class":
+                                "extension_install_zip_too_large",
+                            "size": total,
+                            "limit": _MAX_TOTAL_BYTES,
+                        },
+                    })
+                    return result
+                # v1.6.1 P1: extension.yaml は zip root にあること必須
+                if "extension.yaml" not in zf.namelist():
+                    result.errors.append({
+                        "error_class": "not_found",
+                        "message": (
+                            "zip root に extension.yaml がない "
+                            "(nested package root は未対応)"
+                        ),
+                        "details": {
+                            "sub_class":
+                                "extension_install_zip_no_root_manifest",
+                        },
+                    })
+                    return result
                 for name in zf.namelist():
                     if name.endswith("/"):
                         continue

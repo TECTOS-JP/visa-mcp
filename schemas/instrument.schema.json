@@ -175,6 +175,11 @@
           "default": "",
           "title": "Definition Version",
           "type": "string"
+        },
+        "validation_evidence": {
+          "additionalProperties": true,
+          "title": "Validation Evidence",
+          "type": "object"
         }
       },
       "required": [

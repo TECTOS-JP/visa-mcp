@@ -161,6 +161,20 @@ CLI は **拡張子で auto-route**:
 - `.zip` (`.visa-mcp-ext.zip` 含む) → zip install 経路
 - それ以外 → 従来の extension.yaml 経路
 
+### zip 構造の要件 (v1.6.1)
+
+- **`extension.yaml` は zip root 直下に必須**。nested package root
+  (`pack/extension.yaml` 等) は未対応。
+  → `extension_install_zip_no_root_manifest`
+- **file 数上限: 5000**。超過は `extension_install_zip_too_many_files` error
+- **uncompressed total size 上限: 200 MB**。超過は
+  `extension_install_zip_too_large` error
+- zip 内すべての member が **zip slip safe** (絶対 path / `..` / drive
+  letter を含まない)
+
+tmp directory は **成功 / 失敗どちらでも必ず削除** される
+(`finally: shutil.rmtree(tmpdir, ignore_errors=True)`)。
+
 ### zip install フロー (v1.6)
 
 1. **`verify_extension_package()` を必ず通す**

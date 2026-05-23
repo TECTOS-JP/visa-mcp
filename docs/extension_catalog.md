@@ -107,6 +107,17 @@ pack 内 instrument の `metadata.support_level` を集計した値。
 
 外部 contributor pack の品質を 1 目で見るための指標。
 
+### top-level `author` vs `catalog.authors` (v1.6.1 docs 追記)
+
+| Field | 位置 | 型 | 役割 |
+|-------|------|----|------|
+| `author` | root | str | legacy / 単純 metadata。1 人想定 |
+| `catalog.authors` | `catalog.` | list[dict] | discovery / 表示用。複数 author や `{name, email, url}` 等の構造化情報向け |
+
+v1.6 以降、新規 pack では **`catalog.authors` を推奨**。root `author`
+は後方互換のため残し、両方が指定された場合は **`catalog.authors` を優先
+表示**する (`extension catalog` 出力上の選定指標)。
+
 ## quality_signals (score ではなく signals)
 
 `catalog` / `inspect-package` は **数値 score を返さない**。代わりに
@@ -124,10 +135,26 @@ pack 内 instrument の `metadata.support_level` を集計した値。
     "experimental_instruments": 0,
     "draft_instruments": 0,
     "package_verified": null,
-    "strict_validation_passed": null
+    "package_verification_status": "not_checked",
+    "strict_validation_passed": null,
+    "strict_validation_status": "not_checked"
   }
 }
 ```
+
+#### `package_verified` / `*_status` の意味 (v1.6.1)
+
+`null` を見たときの意味を明示するため、文字列 status を併記している:
+
+| `package_verified` | `package_verification_status` |
+|--------------------|-------------------------------|
+| `true` | `"verified"` |
+| `false` | `"failed"` |
+| `null` | `"not_checked"` (inspect/catalog では未検査) |
+
+完全な検査は `extension verify-package` で別途実行する。`inspect-package`
+/ `catalog` は **軽量読み取り**であり、checksum 検証はしない。
+同様に `strict_validation_passed` も `strict_validation_status` を併記。
 
 ### なぜ score 化しないか
 

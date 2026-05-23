@@ -98,7 +98,16 @@ def quality_signals(
         "experimental_instruments": sl_summary.get("experimental", 0),
         "draft_instruments": sl_summary.get("draft", 0),
         "package_verified": package_verified,           # None=未検査
+        # v1.6.1 P1: null の意味を明示する補助 field
+        "package_verification_status": (
+            "not_checked" if package_verified is None
+            else ("verified" if package_verified else "failed")
+        ),
         "strict_validation_passed": strict_validation_passed,
+        "strict_validation_status": (
+            "not_checked" if strict_validation_passed is None
+            else ("passed" if strict_validation_passed else "failed")
+        ),
     }
 
 
@@ -286,7 +295,29 @@ def inspect_package(zip_path: str | Path) -> dict[str, Any]:
         return out
 
     try:
-        names = set(zf.namelist())
+        all_names = list(zf.namelist())
+        # v1.6.1 P1: 軽量 zip slip check。inspect は extract しないが
+        # member 名を一次的にチェックして、unsafe member があれば warning
+        # に出す (verify-package を必ず通すべきという誘導)。
+        unsafe = []
+        for n in all_names:
+            if n.endswith("/"):
+                continue
+            nn = n.replace("\\", "/")
+            if (nn.startswith("/") or any(p == ".." for p in nn.split("/"))
+                    or (len(nn) >= 2 and nn[1] == ":")):
+                unsafe.append(n)
+        if unsafe:
+            out["warnings"].append({
+                "warning_class": "inspect_package_unsafe_member",
+                "message": (
+                    f"zip 内に safe でない member path が見つかった "
+                    f"({len(unsafe)} 件). install 前に "
+                    f"`extension verify-package` で詳細検査してください"
+                ),
+                "details": {"unsafe_members": unsafe[:5]},
+            })
+        names = set(all_names)
         if "extension.yaml" not in names:
             out["status"] = "error"
             out["errors"].append({
@@ -359,7 +390,9 @@ def inspect_package(zip_path: str | Path) -> dict[str, Any]:
             "experimental_instruments": sl["experimental"],
             "draft_instruments": sl["draft"],
             "package_verified": None,
+            "package_verification_status": "not_checked",
             "strict_validation_passed": None,
+            "strict_validation_status": "not_checked",
         }
 
         entry = {

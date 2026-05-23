@@ -122,8 +122,10 @@ v1.x 内で **名称・引数・response 構造を固定**。新規 optional 引
 | `query_audit` | audit table schema の最終形が未確定 |
 | `list_locks` | ResourceScheduler との source-of-truth 統合が未完了 |
 | `export_experiment_bundle` (v1.0 新規) | bundle 仕様 / sha256 verify 経路が初期 |
+| `validate_experiment_bundle` (v1.1 新規) | bundle 整合性 read-only 検証 |
+| `inspect_experiment_bundle` (v1.1 新規) | bundle 中身要約 (analysis-only、実行・import なし) |
 
-**合計 5 個 (experimental v1.x)** ※ 同上 (`EXPERIMENTAL_TOOLS`)
+**合計 7 個 (experimental v1.x)** ※ 同上 (`EXPERIMENTAL_TOOLS`)
 
 ## 4. Stable schemas (v1.x 互換保証)
 

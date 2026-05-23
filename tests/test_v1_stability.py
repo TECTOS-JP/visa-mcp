@@ -26,12 +26,12 @@ ROOT = Path(__file__).parent.parent
 
 def test_visa_mcp_package_version_is_v1():
     import visa_mcp
-    assert visa_mcp.__version__.startswith("1.0")
+    assert visa_mcp.__version__.startswith("1.")
 
 
 def test_pyproject_version_is_v1():
     text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    assert 'version = "1.0' in text
+    assert 'version = "1.' in text
 
 
 # =========================================================

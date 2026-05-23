@@ -93,6 +93,10 @@ EXPERIMENTAL_TOOLS: Final[dict[str, list[str]]] = {
     "Bundle export": [
         "export_experiment_bundle",
     ],
+    "Bundle inspection (v1.1)": [
+        "validate_experiment_bundle",
+        "inspect_experiment_bundle",
+    ],
 }
 
 

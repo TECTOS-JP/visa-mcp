@@ -70,12 +70,15 @@ Claude に話しかける：
 >
 > 「USB0::0x... を identify_instrument で識別して、5V 出力するように設定してください」
 
-> **v1.0 stability**: Stable 43 tools (v1.x 互換保証) + Experimental 5 tools。
+> **v1.1 stability**: Stable 43 tools (v1.x 互換保証) + Experimental 7 tools
+> (うち `validate_experiment_bundle` / `inspect_experiment_bundle` は v1.1 新規)。
 > raw 系 2 tools は別途オプトイン (`VISA_MCP_ENABLE_RAW_COMMANDS=1`)。
-> 詳細は [`docs/v1_stability_policy.md`](docs/v1_stability_policy.md)、
+> 詳細は [`docs/v1_stability_policy.md`](docs/v1_stability_policy.md) +
+> [`docs/naming_and_repository_strategy.md`](docs/naming_and_repository_strategy.md) +
+> [`docs/backend_abstraction.md`](docs/backend_abstraction.md)、
 > 単一 source は `src/visa_mcp/stability.py`。
 
-## 提供される MCP ツール（48 個 / raw 系 2 個は別途オプトイン）
+## 提供される MCP ツール（50 個 / raw 系 2 個は別途オプトイン）
 
 ### 識別・情報
 
@@ -158,6 +161,8 @@ Claude に話しかける：
 | `query_audit` | 監査ログを filter + cursor pagination で取得 (experimental) ★v0.9.3 |
 | `list_locks` | 現在の resource lock 一覧 (include_stale、experimental) ★v0.9.3 |
 | `export_experiment_bundle` | Job 実験記録を zip (manifest+plan+timeline+results+sha256) で出力 (experimental) ★v1.0 |
+| `validate_experiment_bundle` | bundle zip の整合性を実行なしに検証 (checksum / required files / version、experimental) ★v1.1 |
+| `inspect_experiment_bundle` | bundle 中身要約 (manifest / plan / job_summary / result rows、analysis-only、experimental) ★v1.1 |
 
 ### 取り込み
 

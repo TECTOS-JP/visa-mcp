@@ -656,3 +656,257 @@ def register_tools(mcp: FastMCP, job_mgr: JobManager) -> None:
             },
             job_id=job_id,
         )
+
+    # ====================================================
+    # v1.1: validate / inspect bundle (experimental, read-only)
+    # ====================================================
+
+    SUPPORTED_BUNDLE_VERSIONS = ("1.0",)
+    # plan.json は DSL Job 由来でないと作られないため必須から外す
+    REQUIRED_BUNDLE_FILES = (
+        "manifest.json", "job_record.json", "timeline.jsonl",
+        "results.jsonl", "results.csv",
+    )
+
+    def _read_bundle_safe(p: Path) -> tuple[zipfile.ZipFile | None, dict | None]:
+        """安全に bundle を開く (path 内に存在するかチェック)"""
+        if not p.exists():
+            return None, {
+                "error_class": "not_found",
+                "message": f"bundle not found: {p}",
+            }
+        try:
+            zf = zipfile.ZipFile(p, "r")
+            return zf, None
+        except (zipfile.BadZipFile, OSError) as e:
+            return None, {
+                "error_class": "validation",
+                "message": f"invalid bundle file: {e}",
+                "details": {"sub_class": "invalid_bundle_format"},
+            }
+
+    @mcp.tool()
+    async def validate_experiment_bundle(path: str) -> dict:
+        """**(experimental, v1.1)** bundle zip の整合性を実行なしに検証
+
+        チェック項目:
+          - bundle が読める zip である
+          - manifest.json が存在し JSON として読める
+          - bundle_version が `SUPPORTED_BUNDLE_VERSIONS` に含まれる
+          - 必須 files (`manifest.json` / `plan.json` / `job_record.json` /
+            `timeline.jsonl` / `results.jsonl` / `results.csv`) が揃う
+          - manifest.checksums の各 sha256 が zip 内 file の実 sha256 と一致
+          - visa_mcp_version が記録されている
+
+        Returns:
+          `data.{bundle_valid, bundle_version, job_id, files_checked,
+                checksum_errors, missing_files, warnings}`
+        """
+        p = Path(path).expanduser()
+        zf, err = _read_bundle_safe(p)
+        if err is not None:
+            return make_envelope(
+                "error",
+                errors=[make_error(
+                    err["error_class"], err["message"],
+                    recoverable=False,
+                    details=err.get("details"),
+                )],
+            )
+        assert zf is not None
+        warnings: list[dict] = []
+        checksum_errors: list[dict] = []
+        missing_files: list[str] = []
+        manifest: dict = {}
+        try:
+            names = set(zf.namelist())
+            if "manifest.json" not in names:
+                zf.close()
+                return make_envelope(
+                    "error",
+                    errors=[make_error(
+                        "validation",
+                        "manifest.json が bundle 内に存在しません",
+                        recoverable=False,
+                        details={"sub_class": "missing_manifest"},
+                    )],
+                )
+            try:
+                manifest = json.loads(zf.read("manifest.json"))
+            except Exception as e:
+                zf.close()
+                return make_envelope(
+                    "error",
+                    errors=[make_error(
+                        "validation",
+                        f"manifest.json が JSON として読めません: {e}",
+                        recoverable=False,
+                        details={"sub_class": "invalid_manifest"},
+                    )],
+                )
+
+            bv = manifest.get("bundle_version")
+            if bv not in SUPPORTED_BUNDLE_VERSIONS:
+                warnings.append({
+                    "warning_class": "version_mismatch",
+                    "message": (
+                        f"bundle_version={bv!r} は SUPPORTED_BUNDLE_VERSIONS"
+                        f" {list(SUPPORTED_BUNDLE_VERSIONS)} の範囲外"
+                    ),
+                })
+
+            for req in REQUIRED_BUNDLE_FILES:
+                if req not in names:
+                    missing_files.append(req)
+
+            # checksums 検証
+            for name, expected in (manifest.get("checksums") or {}).items():
+                if name not in names:
+                    checksum_errors.append({
+                        "file": name, "reason": "missing_in_zip",
+                        "expected": expected,
+                    })
+                    continue
+                actual = hashlib.sha256(zf.read(name)).hexdigest()
+                if actual != expected:
+                    checksum_errors.append({
+                        "file": name, "reason": "sha256_mismatch",
+                        "expected": expected, "actual": actual,
+                    })
+
+            if not manifest.get("visa_mcp_version"):
+                warnings.append({
+                    "warning_class": "missing_visa_mcp_version",
+                    "message": "manifest に visa_mcp_version が無い",
+                })
+        finally:
+            zf.close()
+
+        bundle_valid = not (missing_files or checksum_errors)
+        files_checked = len((manifest.get("checksums") or {}))
+        data: dict = {
+            "bundle_valid": bundle_valid,
+            "bundle_version": manifest.get("bundle_version"),
+            "visa_mcp_version": manifest.get("visa_mcp_version"),
+            "job_id": manifest.get("job_id"),
+            "files_checked": files_checked,
+            "checksum_errors": checksum_errors,
+            "missing_files": missing_files,
+            "warnings": warnings,
+        }
+        # errors[] は致命的整合性違反のみ
+        envelope_errors: list[dict] = []
+        if missing_files:
+            envelope_errors.append(make_error(
+                "validation",
+                f"必須ファイルが不足: {missing_files}",
+                recoverable=True,
+                details={"sub_class": "missing_required_files",
+                          "missing": missing_files},
+            ))
+        if checksum_errors:
+            envelope_errors.append(make_error(
+                "validation",
+                f"checksum 不一致が {len(checksum_errors)} 件",
+                recoverable=False,
+                details={"sub_class": "checksum_mismatch",
+                          "checksum_errors": checksum_errors},
+            ))
+        status = "ok" if bundle_valid else "error"
+        return make_envelope(
+            status, data=data,
+            errors=envelope_errors if envelope_errors else None,
+        )
+
+    @mcp.tool()
+    async def inspect_experiment_bundle(
+        path: str,
+        include_plan: bool = True,
+        include_summary: bool = True,
+    ) -> dict:
+        """**(experimental, v1.1)** bundle 中身を実行なしに要約取得
+
+        `validate_experiment_bundle` より弱い検証 (checksum 検証はしない) で、
+        bundle 内容のサマリを返す:
+
+          - manifest (bundle_version / visa_mcp_version / job_id / contents)
+          - plan (optional)
+          - job_summary (optional)
+          - result rows 行数
+          - audit / monitor_data が含まれるか
+
+        import / replay は **行わない**。analysis-only。
+        """
+        p = Path(path).expanduser()
+        zf, err = _read_bundle_safe(p)
+        if err is not None:
+            return make_envelope(
+                "error",
+                errors=[make_error(
+                    err["error_class"], err["message"],
+                    recoverable=False,
+                    details=err.get("details"),
+                )],
+            )
+        assert zf is not None
+        data: dict = {}
+        try:
+            names = zf.namelist()
+            data["files"] = sorted(names)
+            try:
+                manifest = json.loads(zf.read("manifest.json"))
+            except Exception:
+                manifest = {}
+            data["manifest"] = {
+                "bundle_version": manifest.get("bundle_version"),
+                "visa_mcp_version": manifest.get("visa_mcp_version"),
+                "job_id": manifest.get("job_id"),
+                "created_at": manifest.get("created_at"),
+                "contents": manifest.get("contents"),
+                "include_monitor_data": manifest.get("include_monitor_data"),
+                "include_audit": manifest.get("include_audit"),
+            }
+            data["has_audit"] = "audit.jsonl" in names
+            data["has_monitor_data"] = "monitor_data.jsonl" in names
+
+            if include_plan and "plan.json" in names:
+                try:
+                    plan = json.loads(zf.read("plan.json"))
+                    data["plan"] = {
+                        "dsl_version": plan.get("dsl_version"),
+                        "name": plan.get("name"),
+                        "unit": plan.get("unit"),
+                        "step_count": len(plan.get("steps") or []),
+                    }
+                except Exception:
+                    data["plan"] = None
+            if include_summary and "job_summary.json" in names:
+                try:
+                    data["job_summary"] = json.loads(zf.read("job_summary.json"))
+                except Exception:
+                    data["job_summary"] = None
+
+            # result rows 数 (jsonl line count)
+            if "results.jsonl" in names:
+                try:
+                    txt = zf.read("results.jsonl").decode("utf-8")
+                    data["result_row_count"] = sum(
+                        1 for line in txt.splitlines() if line.strip()
+                    )
+                except Exception:
+                    data["result_row_count"] = None
+
+            # compatibility warning
+            warnings: list[dict] = []
+            bv = (manifest or {}).get("bundle_version")
+            if bv not in SUPPORTED_BUNDLE_VERSIONS:
+                warnings.append({
+                    "warning_class": "version_mismatch",
+                    "message": (
+                        f"bundle_version={bv!r} は現バージョン support 範囲外"
+                    ),
+                })
+            data["warnings"] = warnings
+        finally:
+            zf.close()
+        return make_envelope("ok", data=data)

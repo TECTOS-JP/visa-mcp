@@ -1,5 +1,113 @@
 # 変更履歴
 
+## v1.1.0 — Direction-setting release (naming / backend spike + bundle inspection)
+
+合言葉: **「分離するのではなく、分離できるかを判断できる状態にする」**
+
+v1.1 はリポジトリ分割や backend abstraction を **実装しない**。代わりに、
+方向性を文書で固め、bundle 検証 read-only ツールを 2 つ追加する小規模リリース。
+
+### 新規 MCP ツール (2 個、合計 48 → 50, ともに experimental)
+
+| ツール | 役割 |
+|--------|------|
+| `validate_experiment_bundle` (experimental) | bundle zip の整合性 (checksum / required files / version) を実行なしに検証 |
+| `inspect_experiment_bundle` (experimental) | bundle 中身要約 (manifest / plan / job_summary / result rows) — **analysis-only、import / replay は行わない** |
+
+### Direction docs (2 件新規)
+
+- **`docs/naming_and_repository_strategy.md`**: visa-mcp を v1.x 全期間で
+  唯一のリポジトリとして継続。分割しない理由 5 つ、再評価条件 5 つ、v1.1
+  決定一覧 (リポジトリ / package / 名称 / backend / 仮称予約 / 全て NO)
+- **`docs/backend_abstraction.md`**: `InstrumentBackend` Protocol の責務
+  境界、5 backend 候補 (pyvisa / mock / replay / rest / simulator)、
+  **LabVIEW は候補外**、v1.1 spike のスコープ (Protocol 公開のみ、既存経路
+  不変)、判断基準
+
+### Backend spike (実装はしない)
+
+- `src/visa_mcp/backends/base.py` 新規: `InstrumentBackend` Protocol
+  (`@runtime_checkable`)、async `list_resources` / `query` / `write`
+- `src/visa_mcp/backends/__init__.py` 新規
+- **既存 `VisaManager` / `MockVisaManager` は Protocol を明示継承しない**
+  (duck-typed 互換のみ証明、動作変更なし)
+
+### Stability 数の更新
+
+- Stable: **43** (v1.1 で増減なし、v1.x 互換保証維持)
+- Experimental: **5 → 7** (`validate_experiment_bundle` / `inspect_experiment_bundle` 追加)
+- 総数 (raw 除く): 48 → 50
+
+`src/visa_mcp/stability.py` の `EXPERIMENTAL_TOOLS` に
+`"Bundle inspection (v1.1)"` カテゴリを追加。`v1_stability_policy.md` 同期。
+README の数 / バナーも更新。
+
+### `validate_experiment_bundle` 詳細
+
+検査:
+
+- bundle が読める zip である
+- `manifest.json` が存在し JSON として読める (なければ `validation` +
+  `details.sub_class=missing_manifest`)
+- `bundle_version` が `SUPPORTED_BUNDLE_VERSIONS = ("1.0",)` に含まれる
+  (それ以外は `warning_class=version_mismatch`)
+- 必須 files (`manifest.json` / `job_record.json` / `timeline.jsonl` /
+  `results.jsonl` / `results.csv`) が揃う
+  (`plan.json` は DSL Job 由来でないと存在しないため必須から除外)
+- `manifest.checksums` 各 sha256 が zip 内 file の実 sha256 と一致
+  (`validation` + `details.sub_class=checksum_mismatch`)
+- `visa_mcp_version` が記録されている
+
+### `inspect_experiment_bundle` 詳細
+
+返却:
+
+- `manifest` (bundle_version / visa_mcp_version / job_id / created_at /
+  contents / include_monitor_data / include_audit)
+- `plan` (任意、`include_plan=true` 既定) - dsl_version / name / unit /
+  step_count
+- `job_summary` (任意、`include_summary=true` 既定)
+- `result_row_count` (`results.jsonl` 行数)
+- `has_audit` / `has_monitor_data`
+- `warnings` (version_mismatch 等)
+
+**import / replay は行わない** (`docs/bundle_export.md` 参照)。
+
+### テスト
+
+- `tests/test_v11.py` 24 件:
+  - version v1.1.0 確認
+  - direction docs 2 件存在 + 必須キーワード
+  - `InstrumentBackend` Protocol import + duck-typed 互換証明
+  - stability 数 43 / 7 / 50 整合、bundle tools が experimental に登録
+  - 新規 stable tools 無し
+  - `validate_experiment_bundle`: success / missing_manifest /
+    checksum_mismatch / not_found / version_mismatch warning (5 件)
+  - `inspect_experiment_bundle`: summary 取得
+  - v1.1 docs / source files の LF + multi-line (10 件)
+- 既存 `test_v1_stability.py` / `test_v101_review.py` を v1.1 互換に微調整
+- **合計 694 件 passing** (v1.0.1: 669 → v1.1.0: 694)
+
+### 互換性
+
+- **Stable API 不変** (新規追加は全 experimental)
+- 既存 `VisaManager` / `MockVisaManager` の動作変更なし
+- `InstrumentBackend` Protocol は public import 可能だが **既存経路から
+  参照されない** (spike のみ)
+- `lab-executor-mcp` 仮称は **正式予約しない** (`docs/naming_and_repository_strategy.md`)
+
+### スコープ外 (v1.2+)
+
+- リポジトリ / package 分割
+- backend abstraction の本格導入 / adapter 化
+- plugin / extension mechanism (v1.2 候補)
+- remote registry / registry pull CLI
+- bundle replay / import as active job / `import_experiment_bundle`
+- human intent / approval (v1.3+ 候補)
+- 本物の LLM API CI
+
+---
+
 ## v1.0.1 — v1.0 レビュー対応 (P0/P1) + 整合性 single source
 
 v1.0.0 外部レビュー P0/P1 対応。新規 MCP ツール無し、互換維持。

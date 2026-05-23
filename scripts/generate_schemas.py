@@ -83,6 +83,22 @@ def main() -> int:
     )
     print("generated: schemas/benchmark_task.schema.json")
 
+    # v1.2: ExtensionManifest schema (experimental, definition pack manifest)
+    from visa_mcp.extension import ExtensionManifest
+    ext_schema = ExtensionManifest.model_json_schema()
+    _add_preview_metadata(
+        ext_schema, "extension_manifest",
+        "Extension Manifest (definition pack) (v1.2 stable)",
+    )
+    # v1.2 では definition pack の manifest は experimental
+    ext_schema["x-visa-mcp-status"] = "experimental"
+    ext_schema["x-compatibility"] = "subject-to-change-within-v1.x"
+    (SCHEMAS_DIR / "extension_manifest.schema.json").write_text(
+        json.dumps(ext_schema, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    print("generated: schemas/extension_manifest.schema.json")
+
     from visa_mcp.system_config import SystemConfig
     sysconf_schema = SystemConfig.model_json_schema()
     _add_preview_metadata(

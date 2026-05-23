@@ -1,0 +1,286 @@
+"""
+v1.2: ExtensionManifest schema + validator (experimental)
+
+`extension.yaml` (definition pack manifest) を Pydantic で受け取り、
+validate する。**executable Python plugin は v1.2 では未対応** であり、
+`stability.executable_code: true` は validation error とする。
+
+詳細: `docs/extension_policy.md` / `docs/definition_packs.md`
+"""
+from __future__ import annotations
+import re
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Literal
+
+import yaml
+from pydantic import BaseModel, Field, field_validator
+
+
+SUPPORT_LEVELS = ("verified", "tested", "experimental", "draft")
+
+
+class ExtensionContents(BaseModel):
+    """definition pack の中身ファイル参照 (extension.yaml からの相対 path)。
+    すべて optional だが、少なくとも 1 セクションが非空である必要がある。
+    """
+    instruments: list[str] = Field(default_factory=list)
+    benchmarks: list[str] = Field(default_factory=list)
+    templates: list[str] = Field(default_factory=list)
+    mock_scenarios: list[str] = Field(default_factory=list)
+    registry_entries: list[str] = Field(default_factory=list)
+
+
+class ExtensionStability(BaseModel):
+    support_level: str = "draft"
+    # v1.2 では definition pack のみ。executable_code=True は禁止。
+    executable_code: bool = False
+
+    @field_validator("support_level")
+    @classmethod
+    def _support_level_known(cls, v: str) -> str:
+        if v not in SUPPORT_LEVELS:
+            raise ValueError(
+                f"support_level={v!r} は {list(SUPPORT_LEVELS)} のいずれか必須"
+            )
+        return v
+
+    @field_validator("executable_code")
+    @classmethod
+    def _no_executable_code(cls, v: bool) -> bool:
+        if v is True:
+            raise ValueError(
+                "v1.2 では executable_code=true は禁止。definition pack は"
+                "data-driven な YAML/JSON のみを含めてください "
+                "(docs/extension_policy.md 参照)"
+            )
+        return v
+
+
+_EXTENSION_ID_RE = re.compile(r"^[a-z0-9]+(?:[.\-_][a-z0-9]+)*$")
+_SEMVER_RE = re.compile(
+    r"^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z\-.]+)?$"
+)
+
+
+class ExtensionManifest(BaseModel):
+    """v1.2: definition pack manifest (`extension.yaml`)"""
+
+    extension_id: str
+    name: str
+    version: str
+    type: Literal["definition_pack"] = "definition_pack"
+    visa_mcp_compatibility: str = ">=1.2,<2.0"
+    description: str = ""
+    author: str = ""
+    homepage: str = ""
+    license: str = ""
+    contents: ExtensionContents = Field(default_factory=ExtensionContents)
+    stability: ExtensionStability = Field(default_factory=ExtensionStability)
+
+    @field_validator("extension_id")
+    @classmethod
+    def _extension_id_format(cls, v: str) -> str:
+        if not _EXTENSION_ID_RE.match(v):
+            raise ValueError(
+                f"extension_id={v!r} は小文字英数 + '.' / '-' / '_' のみ "
+                f"(reverse-DNS 推奨, e.g. 'tectos.mock.basic')"
+            )
+        return v
+
+    @field_validator("version")
+    @classmethod
+    def _version_semver(cls, v: str) -> str:
+        if not _SEMVER_RE.match(v):
+            raise ValueError(f"version={v!r} は SemVer 形式が必要")
+        return v
+
+
+# ============================================================
+# Validation report (CLI 用)
+# ============================================================
+
+
+@dataclass
+class ExtensionValidationReport:
+    file: str
+    status: str = "ok"      # ok / warning / error
+    errors: list[dict[str, Any]] = field(default_factory=list)
+    warnings: list[dict[str, Any]] = field(default_factory=list)
+    manifest: dict[str, Any] | None = None
+    files_checked: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "file": self.file,
+            "schema": "extension_manifest.schema.json",
+            "errors": list(self.errors),
+            "warnings": list(self.warnings),
+            "manifest": self.manifest,
+            "files_checked": self.files_checked,
+        }
+
+
+def validate_extension_file(
+    path: str | Path,
+) -> ExtensionValidationReport:
+    """`extension.yaml` を読み、manifest + 参照ファイル群を検証する。"""
+    rep = ExtensionValidationReport(file=str(path))
+    p = Path(path)
+    if not p.exists():
+        rep.status = "error"
+        rep.errors.append({
+            "error_class": "not_found",
+            "message": f"extension.yaml not found: {p}",
+        })
+        return rep
+    try:
+        raw = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+        manifest = ExtensionManifest(**raw)
+    except Exception as e:
+        rep.status = "error"
+        rep.errors.append({
+            "error_class": "schema_invalid",
+            "message": f"extension manifest validation failed: {e}",
+        })
+        return rep
+
+    rep.manifest = manifest.model_dump()
+
+    # 中身が空でないこと
+    c = manifest.contents
+    if not any([c.instruments, c.benchmarks, c.templates,
+                c.mock_scenarios, c.registry_entries]):
+        rep.warnings.append({
+            "warning_class": "empty_contents",
+            "message": "contents の全セクションが空。少なくとも 1 ファイル参照を推奨",
+        })
+
+    # 参照ファイル存在 + 各 sub-validation
+    base = p.parent
+    files_checked = 0
+
+    def _ref(rel: str) -> Path:
+        return base / rel
+
+    # instruments
+    from visa_mcp.registry import validate_instrument_file
+    for rel in c.instruments:
+        full = _ref(rel)
+        files_checked += 1
+        if not full.exists():
+            rep.errors.append({
+                "error_class": "not_found",
+                "message": f"referenced instrument file missing: {rel}",
+                "field_path": "contents.instruments",
+            })
+            continue
+        sub = validate_instrument_file(full)
+        if sub.errors:
+            rep.errors.append({
+                "error_class": "schema_invalid",
+                "message": (
+                    f"instrument validation failed: {rel} "
+                    f"({len(sub.errors)} errors)"
+                ),
+                "field_path": "contents.instruments",
+                "details": {"sub_errors": sub.errors},
+            })
+
+    # benchmarks
+    from visa_mcp.testing.benchmark_task import load_benchmark_task
+    for rel in c.benchmarks:
+        full = _ref(rel)
+        files_checked += 1
+        if not full.exists():
+            rep.errors.append({
+                "error_class": "not_found",
+                "message": f"referenced benchmark file missing: {rel}",
+                "field_path": "contents.benchmarks",
+            })
+            continue
+        try:
+            load_benchmark_task(full)
+        except Exception as e:
+            rep.errors.append({
+                "error_class": "schema_invalid",
+                "message": f"benchmark validation failed: {rel}: {e}",
+                "field_path": "contents.benchmarks",
+            })
+
+    # templates (DSL ExperimentPlan として)
+    from visa_mcp.registry import validate_plan_file
+    for rel in c.templates:
+        full = _ref(rel)
+        files_checked += 1
+        if not full.exists():
+            rep.errors.append({
+                "error_class": "not_found",
+                "message": f"referenced template file missing: {rel}",
+                "field_path": "contents.templates",
+            })
+            continue
+        sub = validate_plan_file(full)
+        if sub.errors:
+            rep.errors.append({
+                "error_class": "schema_invalid",
+                "message": f"template validation failed: {rel}",
+                "field_path": "contents.templates",
+                "details": {"sub_errors": sub.errors},
+            })
+
+    # mock_scenarios (YAML として parse できることのみ確認)
+    for rel in c.mock_scenarios:
+        full = _ref(rel)
+        files_checked += 1
+        if not full.exists():
+            rep.errors.append({
+                "error_class": "not_found",
+                "message": f"referenced mock scenario file missing: {rel}",
+                "field_path": "contents.mock_scenarios",
+            })
+            continue
+        try:
+            yaml.safe_load(full.read_text(encoding="utf-8"))
+        except Exception as e:
+            rep.errors.append({
+                "error_class": "schema_invalid",
+                "message": f"mock scenario parse failed: {rel}: {e}",
+                "field_path": "contents.mock_scenarios",
+            })
+
+    # registry_entries (YAML として parse できること + entries 形式の最低限)
+    for rel in c.registry_entries:
+        full = _ref(rel)
+        files_checked += 1
+        if not full.exists():
+            rep.errors.append({
+                "error_class": "not_found",
+                "message": f"referenced registry entries file missing: {rel}",
+                "field_path": "contents.registry_entries",
+            })
+            continue
+        try:
+            data = yaml.safe_load(full.read_text(encoding="utf-8")) or {}
+            if not isinstance(data, dict) or "instruments" not in data:
+                rep.warnings.append({
+                    "warning_class": "registry_entries_format",
+                    "message": (
+                        f"{rel}: 'instruments' キーが見つかりません "
+                        "(registry INDEX 部分相当を期待)"
+                    ),
+                })
+        except Exception as e:
+            rep.errors.append({
+                "error_class": "schema_invalid",
+                "message": f"registry entries parse failed: {rel}: {e}",
+                "field_path": "contents.registry_entries",
+            })
+
+    rep.files_checked = files_checked
+    if rep.errors:
+        rep.status = "error"
+    elif rep.warnings:
+        rep.status = "warning"
+    return rep

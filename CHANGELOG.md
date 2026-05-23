@@ -1,5 +1,126 @@
 # 変更履歴
 
+## v1.2.0 — Definition Extension Release
+
+合言葉: **「plugin を実装する前に、何を拡張可能にするのかを固定する」**
+
+v1.2 は Python plugin loader を**実装しない**。代わりに、拡張は YAML/JSON
+の **definition pack** に集約し、`extension.yaml` manifest schema + CLI
+検証 + 4 件の docs で「何が拡張可能か」を固定する。
+
+### 新規 MCP ツール: **ゼロ**
+
+v1.2 は MCP tool を増やさない (Stable 43 / Experimental 7 / 合計 50 不変)。
+拡張機能は **CLI / docs / schemas / examples** のみ。
+
+### 新規 CLI subcommand
+
+```bash
+visa-mcp validate extension <path-to-extension.yaml> [--json]
+```
+
+検査:
+- `stability.executable_code: false` (true は **schema validation で拒否**)
+- `type: definition_pack` (他値は拒否)
+- `extension_id` の reverse-DNS 形式 / `version` の SemVer
+- 参照ファイル群 (instruments / benchmarks / templates / mock_scenarios /
+  registry_entries) の存在 + それぞれの schema validation
+
+### 新規 module / schema
+
+- **`src/visa_mcp/extension.py`** 新規: `ExtensionManifest` / `ExtensionContents`
+  / `ExtensionStability` Pydantic models + `validate_extension_file()`
+  + `ExtensionValidationReport`
+- **`schemas/extension_manifest.schema.json`** 新規 (experimental スコープ、
+  `x-visa-mcp-status="experimental"`, `x-compatibility="subject-to-change-within-v1.x"`)
+
+### 新規 docs (4 件)
+
+| ファイル | 内容 |
+|---------|------|
+| `docs/extension_policy.md` | v1.2 拡張ポリシー全体 / 5 supported surfaces / 9 NOT supported / data vs code 表 |
+| `docs/definition_packs.md` | `extension.yaml` 仕様 / 必須フィールド / CLI 検証手順 / 配布方法 / Python plugin にしない理由 |
+| `docs/registry_contribution.md` | 機器定義 contribute 手順 + チェックリスト 9 項目 |
+| `docs/replay_backend_concept.md` | replay 設計メモ (実装はしない、何が可能/不可能か、v1.3+ ロードマップ) |
+
+### docs 拡充 (既存)
+
+- **`docs/backend_abstraction.md`**: Backend capability model + Error mapping
+  proposal を design memo として追加 (実装はしない)
+- **`docs/v1_stability_policy.md`**: definition packs / executable plugin
+  未対応 / replay backend concept 注記を追加
+
+### 新規 example
+
+`examples/extensions/mock_basic_pack/`:
+
+```
+extension.yaml
+instruments/
+  mock_psu.yaml
+  mock_dmm.yaml
+benchmarks/
+  task_001.yaml
+README.md
+```
+
+`visa-mcp validate extension <pack>/extension.yaml --json` でリファレンス
+検証可能 (CI で常時 pass)。
+
+### キーポリシー (v1.2)
+
+| 項目 | v1.2 ステータス |
+|------|---------------|
+| YAML/JSON 定義拡張 (instrument / registry / benchmark / template) | **stable** (各 schema 経由) |
+| `extension.yaml` (definition pack manifest) | **experimental** (v1.2 新規) |
+| `InstrumentBackend` Protocol | **experimental spike** (v1.1〜) |
+| Backend capability model / Error mapping | **design memo** (実装なし) |
+| Replay backend | **design memo** (実装なし) |
+| Executable Python plugin | **未対応 (v1.x 内予定なし)** |
+| Plugin entry_points discovery | **未対応 (v1.3+ 候補)** |
+| Remote registry / pull CLI | **未対応 (v1.3+ 候補)** |
+
+### テスト
+
+`tests/test_v12_extension.py` 42 件:
+
+- 4 件の v1.2 docs 存在 + 必須キーワード
+- `v1_stability_policy.md` の definition packs 言及
+- `backend_abstraction.md` の capability model + error mapping
+- `ExtensionManifest` schema (minimal valid / `executable_code: true` 拒否 /
+  非 definition_pack type 拒否 / 不正 extension_id 拒否 / 非 SemVer version
+  拒否 / 不正 support_level 拒否)
+- `validate_extension_file()` (example pack pass / not found / executable
+  code reject / missing file / empty contents warning)
+- `extension_manifest.schema.json` 生成 + experimental status
+- CLI 統合: `visa-mcp validate extension` 成功 / 失敗
+- **新規 Stable tools 無し** (Stable 43 不変)
+- **Experimental tools 不変** (7 のまま、validate/inspect_experiment_bundle のみ)
+- v1.2 ファイル 8 件の LF + multi-line 検証
+
+旧 v1.1 / v1.1.1 version assertion を `1.` 全般許容に微調整 (互換維持)。
+
+**合計 763 件 passing** (v1.1.1: 721 → v1.2.0: 763)
+
+### 互換性
+
+- **Stable API / Experimental MCP tools とも完全不変**
+- 新規追加は **すべて CLI / docs / schemas** (MCP tool ゼロ)
+- 既存 DB schema 不変
+- definition pack manifest は experimental スコープ
+
+### スコープ外 (v1.3+ 候補)
+
+- Python plugin auto-loading / `entry_points` discovery
+- Backend plugin の実行
+- Remote registry / pull CLI
+- Replay backend 本実装 + `bundle_version=1.1` 拡張
+- `import_experiment_bundle` / replay as active job
+- Human intent / approval
+- Custom DSL step / evaluator function
+
+---
+
 ## v1.1.1 — v1.1 レビュー対応 (P0/P1/P2)
 
 v1.1.0 外部レビュー P0/P1/P2 対応。新規 MCP ツール無し、互換維持。

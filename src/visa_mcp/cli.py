@@ -73,6 +73,11 @@ def cmd_validate(args: argparse.Namespace) -> int:
     if target == "registry":
         reps = [r.to_dict() for r in reg.validate_registry(path)]
         return _emit(reps, args.json)
+    if target == "extension":
+        # v1.2: extension manifest (definition pack) validation
+        from visa_mcp.extension import validate_extension_file
+        rep = validate_extension_file(path).to_dict()
+        return _emit([rep], args.json)
     if target == "schemas":
         # schemas/*.schema.json がすべて pretty-printed + preview metadata を
         # 持っているか確認
@@ -136,7 +141,7 @@ def build_parser() -> argparse.ArgumentParser:
     val.add_argument(
         "target",
         choices=["instrument", "system", "plan", "benchmark", "registry",
-                 "schemas"],
+                 "schemas", "extension"],
         help="検証対象",
     )
     val.add_argument(

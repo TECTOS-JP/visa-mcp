@@ -238,6 +238,17 @@ v1.x で禁止:
 > 詳細は [`docs/backend_abstraction.md`](backend_abstraction.md) Open questions
 > を参照。
 
+> **Definition packs (`extension.yaml`)** (v1.2 新規) は **experimental
+> extension surface**。`schemas/extension_manifest.schema.json` 構造は
+> v1.x 内で追加可能 (新フィールドは backward-compatible)。
+> **Executable plugin (Python code) は v1.2 では未対応**。v1.x 内で対応
+> 予定なし。詳細は [`docs/extension_policy.md`](extension_policy.md) /
+> [`docs/definition_packs.md`](definition_packs.md)。
+
+> **Replay backend** は **概念整理のみ** (v1.2 では実装しない)。
+> `inspect_experiment_bundle.compatibility.can_be_replayed=false` を
+> 引き続き返す。詳細は [`docs/replay_backend_concept.md`](replay_backend_concept.md)。
+
 
 - benchmark runner internals (`src/visa_mcp/testing/`)
 - registry CLI internals (`visa-mcp validate` の出力詳細)

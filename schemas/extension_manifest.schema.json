@@ -1,0 +1,124 @@
+{
+  "$defs": {
+    "ExtensionContents": {
+      "description": "definition pack の中身ファイル参照 (extension.yaml からの相対 path)。\nすべて optional だが、少なくとも 1 セクションが非空である必要がある。",
+      "properties": {
+        "instruments": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Instruments",
+          "type": "array"
+        },
+        "benchmarks": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Benchmarks",
+          "type": "array"
+        },
+        "templates": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Templates",
+          "type": "array"
+        },
+        "mock_scenarios": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Mock Scenarios",
+          "type": "array"
+        },
+        "registry_entries": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Registry Entries",
+          "type": "array"
+        }
+      },
+      "title": "ExtensionContents",
+      "type": "object"
+    },
+    "ExtensionStability": {
+      "properties": {
+        "support_level": {
+          "default": "draft",
+          "title": "Support Level",
+          "type": "string"
+        },
+        "executable_code": {
+          "default": false,
+          "title": "Executable Code",
+          "type": "boolean"
+        }
+      },
+      "title": "ExtensionStability",
+      "type": "object"
+    }
+  },
+  "description": "v1.2: definition pack manifest (`extension.yaml`) (v1.0 stable. 詳細互換保証は docs/v1_stability_policy.md 参照。 一部 experimental fields は v1.x 内で変更可能。)",
+  "properties": {
+    "extension_id": {
+      "title": "Extension Id",
+      "type": "string"
+    },
+    "name": {
+      "title": "Name",
+      "type": "string"
+    },
+    "version": {
+      "title": "Version",
+      "type": "string"
+    },
+    "type": {
+      "const": "definition_pack",
+      "default": "definition_pack",
+      "title": "Type",
+      "type": "string"
+    },
+    "visa_mcp_compatibility": {
+      "default": ">=1.2,<2.0",
+      "title": "Visa Mcp Compatibility",
+      "type": "string"
+    },
+    "description": {
+      "default": "",
+      "title": "Description",
+      "type": "string"
+    },
+    "author": {
+      "default": "",
+      "title": "Author",
+      "type": "string"
+    },
+    "homepage": {
+      "default": "",
+      "title": "Homepage",
+      "type": "string"
+    },
+    "license": {
+      "default": "",
+      "title": "License",
+      "type": "string"
+    },
+    "contents": {
+      "$ref": "#/$defs/ExtensionContents"
+    },
+    "stability": {
+      "$ref": "#/$defs/ExtensionStability"
+    }
+  },
+  "required": [
+    "extension_id",
+    "name",
+    "version"
+  ],
+  "title": "Extension Manifest (definition pack) (v1.2 stable)",
+  "type": "object",
+  "$id": "https://tectos-jp.github.io/visa-mcp/schemas/extension_manifest.schema.v1.json",
+  "x-visa-mcp-status": "experimental",
+  "x-compatibility": "subject-to-change-within-v1.x"
+}

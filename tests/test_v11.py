@@ -34,8 +34,8 @@ ROOT = Path(__file__).parent.parent
 
 def test_version_is_v1_1_0():
     import visa_mcp
-    # v1.1.x 系列を許容 (v1.1.1 で patch bump)
-    assert visa_mcp.__version__.startswith("1.1.")
+    # v1.1.x 以降の v1.x 系列を許容 (v1.2+ で再 bump)
+    assert visa_mcp.__version__.startswith("1.")
 
 
 # =========================================================

@@ -82,7 +82,14 @@ class IntegrityReport:
 
 @dataclass
 class InspectReport:
-    """1 つの installed extension の詳細"""
+    """1 つの installed extension の詳細
+
+    `integrity` は **軽量チェックの結果** (`.install_meta.json` /
+    `extension.yaml` の存在のみを見る)。完全な sha256 drift 検査は
+    `check_installed_extension()` (CLI: `visa-mcp extension check`) を
+    使う。これを v1.4.1 から `integrity_check_level` / `full_check_tool`
+    として JSON 上にも明示する。
+    """
     extension_id: str = ""
     version: str = ""
     installed_at: str = ""
@@ -92,6 +99,8 @@ class InspectReport:
     contents_summary: dict[str, int] = field(default_factory=dict)
     registry_entry_ids: list[str] = field(default_factory=list)
     integrity: str = "ok"
+    # v1.4.1: integrity の検査レベル明示
+    integrity_check_level: str = "light"
     warnings: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -105,6 +114,12 @@ class InspectReport:
             "contents_summary": dict(self.contents_summary),
             "registry_entry_ids": list(self.registry_entry_ids),
             "integrity": self.integrity,
+            "integrity_check_level": self.integrity_check_level,
+            "full_check_tool": (
+                f"visa-mcp extension check {self.extension_id}"
+                if self.extension_id else
+                "visa-mcp extension check <extension_id>"
+            ),
             "warnings": list(self.warnings),
         }
 
@@ -289,7 +304,10 @@ def check_installed_extension(
             "message": "extension.yaml が install path に存在しません",
         })
     else:
-        val_rep = validate_extension_file(manifest_path)
+        # v1.4.1 P1: strict を validate にも伝搬する。これにより
+        # strict_support_level_draft / strict_verified_requires_evidence
+        # 等も check --strict で拾える
+        val_rep = validate_extension_file(manifest_path, strict=strict)
         for e in val_rep.errors:
             rep.errors.append({
                 "error_class": e.get("error_class", "validation"),

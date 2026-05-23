@@ -1,5 +1,76 @@
 # 変更履歴
 
+## v1.4.1 — v1.4.0 レビュー応答 (strict 整合 / inspect 明示 / taxonomy 整理)
+
+合言葉: **「strict mode の挙動を一貫させ、inspect が何を見ているかを明示する」**
+
+v1.4.0 の external review (P0/P1) を反映した patch release。
+MCP tool 追加ゼロ、互換変更なし。
+
+### 変更点
+
+- **P0**: 新規 / 変更 file の LF / multi-line を v1.4.1 でも parametrized
+  test 化 (`tests/test_v141_review.py`)。CR / 1 行潰れを raw 上で検知。
+- **P1-2** (`extension_integrity.py::check_installed_extension`):
+  `strict=True` 時に **`validate_extension_file(strict=True)` を呼ぶ**
+  ように修正。これにより `extension check --strict` でも
+  `strict_support_level_draft` / `strict_verified_requires_evidence`
+  等の strict-only error が拾える。
+- **P1-3** (`models/instrument_def.py`):
+  `validation_evidence` の docstring を「strict mode で空のとき
+  `strict_verified_requires_evidence` **error**」と修正
+  (旧コメントは "warning" 表記でリリースノートと不整合)。
+- **P1-4** (`extension_integrity.py::InspectReport`):
+  `inspect` が **軽量チェック**であることを JSON 上で明示。
+  - `integrity_check_level: "light"` を返却 dict に追加
+  - `full_check_tool: "visa-mcp extension check <id>"` を併記
+  - docstring に「sha256 drift 検査は `check` を使う」と明記
+- **P1-5** (`extension.py::validate_extension_file` strict ブロック):
+  strict mode で `registry_entries` 内 entry の **深掘り検査**を追加:
+  - `id` / `path` 必須 (`strict_registry_entry_missing_id` /
+    `_missing_path`)
+  - `vendor` / `model` / `category` / `support_level` 必須
+    (`strict_registry_entry_missing_<field>`)
+  - `support_level` 値域チェック
+    (`strict_registry_entry_invalid_support_level`)
+  - path が pack 外を指していないか
+    (`strict_registry_entry_path_outside_pack`)
+  - 参照先 instrument YAML との `support_level` 一致
+    (`strict_registry_entry_support_level_mismatch`)
+- **P1-6** (`docs/error_taxonomy.md`):
+  Extension 系 error_class taxonomy を新規 section として整理。
+  Manifest validation / Install / Overlay registry / Integrity /
+  Strict validation の 5 グループに分類、関連 warning_class も併記。
+  「v1.0 で凍結した MCP error taxonomy とは別グループ (CLI 専用)」
+  であることを明記。
+- **P1-7** (`docs/extension_integrity.md`):
+  `extension uninstall --dry-run` と通常 `uninstall` の差を表で明示
+  (rmtree / lockfile 編集の有無、返却 field、終了コード)。strict
+  mode の用途分け (ローカル / CI / registry / release) も追加。
+
+### 新規 error_class (strict validation 深掘り)
+
+- `strict_registry_entry_missing_id`
+- `strict_registry_entry_missing_path`
+- `strict_registry_entry_missing_vendor`
+- `strict_registry_entry_missing_model`
+- `strict_registry_entry_missing_category`
+- `strict_registry_entry_missing_support_level`
+- `strict_registry_entry_invalid_support_level`
+- `strict_registry_entry_path_outside_pack`
+- `strict_registry_entry_support_level_mismatch`
+
+### 互換性
+
+- `validate_extension_file` / `check_installed_extension` の signature
+  は不変 (引数追加なし、`strict` keyword は v1.4.0 から)
+- `InspectReport.to_dict()` に 2 field 追加 (`integrity_check_level`,
+  `full_check_tool`)。既存 consumer は新 key を無視するだけで動く。
+- 通常 (`--strict` 無し) validate は挙動不変
+- Stable 43 / Experimental 7 / 合計 50 不変
+
+---
+
 ## v1.4.0 — Installed Definition Pack Integrity / Overlay Registry Inspection
 
 合言葉: **「install できる」→「install したものを信頼して使い続けられる」**

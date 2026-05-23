@@ -385,6 +385,111 @@ def validate_extension_file(
                         "field_path": "metadata.validation_evidence",
                     })
 
+        # v1.4.1 P1: registry_entries 内 entry の深掘り検査
+        #   - id / path / vendor / model / category / support_level 必須
+        #   - path が pack 外を指さない
+        #   - support_level は SUPPORT_LEVELS のいずれか
+        #   - 参照先 instrument YAML が pack 内にある場合、
+        #     metadata.support_level と一致
+        from visa_mcp.registry import SUPPORT_LEVELS
+        base_resolved2 = base.resolve()
+        for rel in manifest.contents.registry_entries:
+            full = base / rel
+            if not full.exists():
+                continue
+            try:
+                data = yaml.safe_load(full.read_text(encoding="utf-8")) or {}
+            except Exception:
+                continue
+            for i, item in enumerate(data.get("instruments") or []):
+                fp = f"contents.registry_entries[{rel}].instruments[{i}]"
+                item_id = item.get("id", "")
+                item_path = item.get("path", "")
+                item_vendor = item.get("vendor", "")
+                item_model = item.get("model", "")
+                item_category = item.get("category", "")
+                item_sl = item.get("support_level", "")
+                if not item_id:
+                    rep.errors.append({
+                        "error_class": "strict_registry_entry_missing_id",
+                        "message": f"(strict) {fp}: id が無い",
+                        "field_path": fp + ".id",
+                    })
+                if not item_path:
+                    rep.errors.append({
+                        "error_class": "strict_registry_entry_missing_path",
+                        "message": (
+                            f"(strict) {fp} (id={item_id!r}): path が無い"
+                        ),
+                        "field_path": fp + ".path",
+                    })
+                for fname, fval in (
+                    ("vendor", item_vendor),
+                    ("model", item_model),
+                    ("category", item_category),
+                    ("support_level", item_sl),
+                ):
+                    if not fval:
+                        rep.errors.append({
+                            "error_class":
+                                f"strict_registry_entry_missing_{fname}",
+                            "message": (
+                                f"(strict) {fp} (id={item_id!r}): "
+                                f"{fname} が無い"
+                            ),
+                            "field_path": fp + f".{fname}",
+                        })
+                if item_sl and item_sl not in SUPPORT_LEVELS:
+                    rep.errors.append({
+                        "error_class":
+                            "strict_registry_entry_invalid_support_level",
+                        "message": (
+                            f"(strict) {fp} (id={item_id!r}): "
+                            f"support_level={item_sl!r} は "
+                            f"{list(SUPPORT_LEVELS)} のいずれかが必要"
+                        ),
+                        "field_path": fp + ".support_level",
+                    })
+                # path が pack 外を指していないか
+                if item_path:
+                    try:
+                        resolved = (base / item_path).resolve()
+                        resolved.relative_to(base_resolved2)
+                    except (OSError, ValueError):
+                        rep.errors.append({
+                            "error_class":
+                                "strict_registry_entry_path_outside_pack",
+                            "message": (
+                                f"(strict) {fp} (id={item_id!r}): "
+                                f"path {item_path!r} が pack 外を指している"
+                            ),
+                            "field_path": fp + ".path",
+                        })
+                        continue
+                    # 参照先 instrument YAML との support_level 一致
+                    if resolved.exists() and item_sl:
+                        try:
+                            idata = yaml.safe_load(
+                                resolved.read_text(encoding="utf-8"),
+                            ) or {}
+                            inner_sl = ((idata.get("metadata") or {})
+                                         .get("support_level"))
+                            if inner_sl and inner_sl != item_sl:
+                                rep.errors.append({
+                                    "error_class":
+                                        "strict_registry_entry_support_level_mismatch",
+                                    "message": (
+                                        f"(strict) {fp} (id={item_id!r}): "
+                                        f"registry support_level="
+                                        f"{item_sl!r} と instrument "
+                                        f"metadata.support_level="
+                                        f"{inner_sl!r} が不一致"
+                                    ),
+                                    "field_path": fp + ".support_level",
+                                })
+                        except Exception:
+                            pass
+
     if rep.errors:
         rep.status = "error"
     elif rep.warnings:

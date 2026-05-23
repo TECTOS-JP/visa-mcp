@@ -103,6 +103,42 @@ visa-mcp extension uninstall tectos.mock.basic --dry-run
 drift が出た場合の対応は **AI ではなく人間 / CI** が判断する。
 v1.4 では自動 repair / auto-reinstall は実装しない (v1.5+ 候補)。
 
+## `extension uninstall --dry-run` と通常 uninstall の違い
+
+| 項目 | 通常 `uninstall` | `--dry-run` |
+|------|-----------------|-------------|
+| install_path の `rmtree` | 実行 | **しない** |
+| lockfile entry 削除 | 実行 | **しない** |
+| 返却 status | `ok` / `error` | `ok` (dry_run=True) / `error` |
+| 返却 field | `removed_path` | `would_remove_path` / `would_remove_file_count` / `would_remove_lockfile_entry` / `would_remove_overlay_ids` |
+| overlay 影響 | (削除後に消える) | 削除されるはずの overlay id 一覧 |
+| 終了コード | 1 (error 時) | 1 (error 時) |
+
+dry-run は **読み取りのみ** で、ファイル削除 / lockfile 変更を一切行わ
+ない。AI エージェント / CI が「この pack を消したらどの instrument id
+が effective registry から消えるか」を事前確認する用途。
+
+```bash
+# 確認だけ
+visa-mcp extension uninstall tectos.mock.basic --dry-run --json
+
+# 実際に消す
+visa-mcp extension uninstall tectos.mock.basic
+```
+
+## strict mode の用途
+
+`--strict` は **registry 掲載検査 / CI / release 前検査** 向け。
+ローカル開発中の `support_level=draft` や `extension_extra_file` 等は
+strict ではない通常検査では warning にとどまる。
+
+| 用途 | 推奨 |
+|------|------|
+| ローカル開発中 / 動作確認 | normal (`--strict` なし) |
+| registry pull request 検査 | `--strict` 必須 |
+| CI fail gate | `--strict` 必須 |
+| release tag 前 | `--strict` 推奨 |
+
 ## strict mode
 
 `visa-mcp validate extension <path> --strict` と

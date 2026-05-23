@@ -111,8 +111,11 @@ class MetadataConfig(BaseModel):
     tested_interfaces: list[str] = Field(default_factory=list)  # ["USB", "LAN", "GPIB"]
     tested_firmware: str = ""
     definition_version: str = ""           # 機器定義 YAML 自体の改訂番号 (任意)
-    # v1.4: support_level=verified の実質的な根拠 (任意)。strict mode で
-    # support_level=verified にもかかわらず未指定なら warning となる。
+    # v1.4: support_level=verified の実質的な根拠 (任意)。
+    # 通常 validation では空でも問題ない。
+    # **strict mode** (`validate extension --strict` / `extension check --strict`)
+    # で support_level=verified にもかかわらず空 dict のときは
+    # `strict_verified_requires_evidence` **error** となる。
     # 例:
     #   validation_evidence:
     #     tested_by: "TECTOS"

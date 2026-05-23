@@ -99,8 +99,85 @@ AI エージェントが「次の判断」を決めるために、`error_class` 
 
 v1.0 以降は **新規 error_class 追加は OK、既存 error_class の意味変更・rename は NG**。
 
+## Extension 系 error_class (CLI 専用、v1.2–v1.4 で追加)
+
+extension manifest / install / overlay registry / integrity 系で発生する
+error_class。**MCP tool ではなく CLI JSON 出力上の error** であり、v1.0
+で凍結した MCP error taxonomy とは別グループとして扱う。AI エージェント
+には伝わらず、人間 / CI / 自動化スクリプトが読む。
+
+### Manifest validation (v1.2 / v1.2.1)
+
+| error_class | 意味 |
+|-------------|------|
+| `extension_path_outside_pack` | contents.* path が pack 外参照 (絶対 / `..` traversal) |
+
+### Install (v1.3 / v1.3.1)
+
+| error_class | 意味 |
+|-------------|------|
+| `extension_duplicate_install` | 同 extension_id が既に install 済み (--force で上書き) |
+| `extension_validation_failed` | install 前 validation 失敗 |
+| `extension_source_inside_extensions_dir` | install 元 path が `extensions_dir` 配下 |
+
+### Overlay registry (v1.3 / v1.3.1)
+
+| error_class | 意味 |
+|-------------|------|
+| `overlay_registry_duplicate_id` | builtin / extension 間で id 衝突 |
+| `registry_entry_path_outside_pack` | overlay 構築時、entry の path が pack 外 |
+| `registry_entry_missing_id` | overlay entry の id が空 |
+| `registry_entry_missing_path` | overlay entry の path が空 |
+
+### Integrity (v1.4)
+
+| error_class | integrity 値 |
+|-------------|---------------|
+| `extension_install_path_missing` | `missing_file` |
+| `extension_install_meta_missing` | `invalid` |
+| `extension_manifest_missing` | `invalid` |
+| `extension_checksum_mismatch` | `modified` |
+| `extension_checksum_unreadable` | `modified` |
+| `extension_file_missing` | `missing_file` |
+
+### Strict validation (v1.4 / v1.4.1)
+
+`validate extension --strict` および `extension check --strict` 専用。
+通常 validation の warning を error に格上げする (registry 掲載 / CI /
+release 前検査向け)。`strict_` prefix で識別できる。
+
+| error_class | 通常時 |
+|-------------|--------|
+| `strict_empty_contents` | warning |
+| `strict_registry_entries_format` | warning |
+| `strict_support_level_draft` | warning |
+| `strict_verified_requires_evidence` | (なし) |
+| `strict_registry_entry_missing_id` | warning |
+| `strict_registry_entry_missing_path` | warning |
+| `strict_registry_entry_missing_vendor` | warning |
+| `strict_registry_entry_missing_model` | warning |
+| `strict_registry_entry_missing_category` | warning |
+| `strict_registry_entry_missing_support_level` | warning |
+| `strict_registry_entry_invalid_support_level` | warning |
+| `strict_registry_entry_path_outside_pack` | (なし) |
+| `strict_registry_entry_support_level_mismatch` | warning |
+| `strict_extension_extra_file` | warning |
+
+### 関連 warning_class
+
+| warning_class | 意味 |
+|---------------|------|
+| `extension_extra_file` | metadata 外の file が install path に存在 |
+| `extension_missing_manifest` | overlay 構築時、installed pack に extension.yaml 無し |
+| `registry_entry_missing_vendor` / `_model` / `_category` / `_support_level` | overlay entry の補足項目欠落 |
+| `empty_contents` | manifest の contents.* が全て空 |
+| `registry_entries_format` | registry_entries YAML が `instruments` キーを持たない |
+
 ## 関連
 
 - `docs/compatibility.md`: v1.0 互換保証対象一覧
+- `docs/extension_integrity.md`: integrity 検査と strict mode
+- `docs/extension_install.md`: install フロー
+- `docs/extension_registry_overlay.md`: overlay registry
 - `src/visa_mcp/response_envelope.py`: `make_error` 構造
 - `src/visa_mcp/observation.py`: `_is_recoverable` 判定ロジック

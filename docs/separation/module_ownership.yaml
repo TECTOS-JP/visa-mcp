@@ -354,8 +354,9 @@ modules:
 
 # Statistics for v1.10 (manual count、test で実装と一致を確認):
 statistics:
-  lab_executor_mcp_count: 51
+  lab_executor_mcp_count: 59
   visa_mcp_count: 4
-  split_count: 7
+  split_count: 8
   shared_count: 2
   unclassified_count: 0   # CI で 0 を強制
+  # 計 73 module (test_v110_separation_audit.py で実 owner count と一致確認)

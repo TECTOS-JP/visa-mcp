@@ -1,5 +1,55 @@
 # 変更履歴
 
+## v1.10.1 — v1.10.0 レビュー応答 (format guard 拡張 / statistics 自動検証 / 補強)
+
+合言葉: **「v1.10 で導入した分離設計台帳を、format guard と自動検証で
+守る」**
+
+v1.10.0 の external review (P0/P1) を反映した patch release。
+public API / CLI 引数 / schema / MCP tool 一覧すべて不変。
+
+### 変更点
+
+- **P0-2** (`tests/test_repo_format_guard.py`): SWEEP_PATTERNS に
+  `docs/**/*.yaml` / `docs/**/*.yml` を追加。今回 `module_ownership.yaml`
+  / `split_manifest.yaml` が repo-wide format guard の対象外だった件
+  への直接 fix (将来同種の YAML が圧縮されたら CI で即検出)
+- **P0-3 / P1-4** (`tests/test_v110_separation_audit.py` 追加 3 件):
+  - `test_dependency_graph_md_committed_multiline`:
+    `docs/separation/dependency_graph.md` が 20 行以上 + 必須 section
+    (`# Dependency Graph Report` / `## Statistics` / `## Owner counts`)
+    を含む + CR 無し
+  - `test_module_ownership_statistics_match`: manifest 末尾の
+    `statistics:` block が **実 owner count と一致**することを Counter
+    で自動検証
+  - `test_module_ownership_yaml_not_collapsed`: separation YAML 2 件が
+    30 行以上 + LF only
+- **P1-4 副作用修正** (`docs/separation/module_ownership.yaml`):
+  v1.10.0 の statistics 宣言値 (51/4/7/2) が実 count (59/4/8/2) と
+  ズレていたため正しい値に更新。test で今後の drift を防止
+- **`test_version_is_1_10_x`**: patch release で fail させないよう
+  `1.10.0` 固定 → `startswith("1.10.")` に緩和
+- **`split_manifest_paths_exist`**: しきい値方針を inline コメント化
+  (v1.10 70% / v1.11 split_files 除き 100% / v2.0.0-rc1 で
+  move_to/keep_in は 100%、split_files はすべて resolved)
+- **`docs/separation/notes.md`** 拡張:
+  - v1.10.1 patch summary
+  - **v1.11 最重要 gate: `KNOWN_V111_TO_RESOLVE = empty set`** を強調
+  - `visa-mcp` 側 docs 戦略 (`docs/raw_visa.md` を v1.11 / rc1 で
+    draft 作成) を TODO 化
+  - `instrument_authoring.py` の `lab_executor/instrument_authoring/`
+    分割検討 memo
+
+### tests
+
+- 全 test: **1519 passing** (v1.10.0 比 +3)
+
+### 互換性
+
+- MCP tool 数 / DSL schema / extension pack 形式: 不変
+- `module_ownership.yaml` / `split_manifest.yaml` の構造: 不変
+  (statistics 値のみ正確化)
+
 ## v1.10.0 — Separation Readiness Audit + Instrument Review Workflow
 
 合言葉: **「分離前の最終仕上げ — module ownership を機械可読化し、

@@ -19,6 +19,8 @@ SWEEP_PATTERNS = [
     "src/**/*.py",
     "tests/**/*.py",
     "docs/**/*.md",
+    "docs/**/*.yaml",
+    "docs/**/*.yml",
     ".github/workflows/**/*.yml",
     ".github/workflows/**/*.yaml",
     "examples/**/*.yaml",

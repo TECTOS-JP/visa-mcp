@@ -17,6 +17,78 @@
 
 v1.11 では `KNOWN_V111_TO_RESOLVE` を 0 件まで削減することが gate。
 
+## v1.10.1 patch (raw 改行 + statistics 自動検証 + 補強)
+
+- repo format guard (`tests/test_repo_format_guard.py`) の sweep 対象に
+  `docs/**/*.yaml` / `docs/**/*.yml` を追加 (今回 separation manifest
+  が format guard の対象外だった件への P0 修正)
+- `tests/test_v110_separation_audit.py` に以下を追加:
+  - `test_dependency_graph_md_committed_multiline`:
+    `docs/separation/dependency_graph.md` が 20 行以上 + 必須 section
+    を含むこと
+  - `test_module_ownership_statistics_match`: statistics block と
+    実 owner count が一致 (P1-4)
+  - `test_module_ownership_yaml_not_collapsed`: separation YAML 2 件が
+    30 行以上 + CR 無し
+- `test_version_is_1_10_x`: patch release で fail させないよう
+  `1.10.*` 許容
+- `split_manifest_paths_exist` のしきい値方針を inline コメント化
+  (v1.10 70% / v1.11 100% / rc1 split_files 解消)
+
+## v1.11 の最重要 gate (preview, 強調)
+
+**`KNOWN_V111_TO_RESOLVE` を 0 件にする** ことが v1.11 完了条件。残った
+ままだと v2.0 で lab-executor 側が visa-mcp に top-level 依存したまま
+分離される。
+
+v1.11 P0:
+
+```
+1. InstrumentBackend Protocol 実体化
+2. PyVisaBackend / MockBackend adapter
+3. session_manager direct import → InstrumentBackend 経由
+4. visa_manager direct import → PyVisaBackend 経由
+5. testing/mock_instruments の lazy exception を共通 error へ置換
+6. KNOWN_V111_TO_RESOLVE = empty set
+7. step_executor.py / tools/commands.py / registry.py / server.py /
+   cli.py の split 準備
+8. src/lab_executor_candidate/ split rehearsal
+```
+
+## visa-mcp 側 docs 戦略 (v1.11 / rc1 で確定する TODO)
+
+`split_manifest.yaml` で `docs/raw_visa.md` を v2.0 新規作成予定と
+書いたが、**v1.11 か rc1 で drafts を作っておく**と分離後の visa-mcp
+が空洞に見えない。想定構成:
+
+```
+lab-executor-mcp docs:
+- DSL / Job / Observation / Benchmark / Definition pack /
+  Instrument authoring / extension ecosystem / v2 migration guide
+
+visa-mcp docs:
+- PyVISA backend setup
+- list_resources / raw VISA / environment flags
+  (VISA_MCP_ALLOW_RAW など)
+- migration shim (visa_mcp → lab_executor)
+- how to use visa-mcp as backend provider for lab-executor-mcp
+```
+
+## instrument_authoring.py 分割の v1.11 検討
+
+`review_report_instrument()` 追加で `instrument_authoring.py` の責務
+が増えたため、v1.11 split rehearsal の段階で:
+
+```
+lab_executor/instrument_authoring/
+  scaffold.py
+  add_to_extension.py
+  promote.py
+  review.py
+```
+
+への分割を検討する (v1.10.1 では不要)。
+
 
 
 合言葉: **「v2.0 でリポジトリを分けるための、v1.9 から積む下準備

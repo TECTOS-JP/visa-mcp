@@ -20,9 +20,10 @@ import yaml
 ROOT = Path(__file__).parent.parent
 
 
-def test_version_is_1_10_0():
+def test_version_is_1_10_x():
     from visa_mcp import __version__
-    assert __version__ == "1.10.0"
+    # v1.10.0 / v1.10.1 / etc を許容 (patch release で test 失敗させない)
+    assert __version__.startswith("1.10.")
 
 
 def test_module_ownership_manifest_complete():
@@ -67,6 +68,10 @@ def test_split_manifest_paths_exist():
     all_paths = [p for p in move_paths + keep_paths
                   if not p.startswith("docs/") and "raw_visa" not in p]
     existing = sum(1 for p in all_paths if (ROOT / p).exists())
+    # v1.10: 70% で OK (draft)
+    # v1.11: split_files 予定を除き 100% にする TODO (notes.md 参照)
+    # v2.0.0-rc1: move_to_lab_executor / keep_in_visa_mcp は 100%、
+    #             split_files はすべて resolved
     assert existing / max(len(all_paths), 1) > 0.7, (
         f"split_manifest の path 多くが実在しない: "
         f"{existing}/{len(all_paths)}")
@@ -80,6 +85,64 @@ def test_dependency_graph_generated(tmp_path):
     assert "# Dependency Graph Report" in md
     assert "Owner counts" in md
     assert "## Statistics" in md
+
+
+def test_dependency_graph_md_committed_multiline():
+    """v1.10.1 P0-3: docs/separation/dependency_graph.md が
+    実体として multi-line で commit されている (raw 上で潰れていない)"""
+    p = ROOT / "docs" / "separation" / "dependency_graph.md"
+    assert p.exists(), f"{p} が存在しない"
+    text = p.read_text(encoding="utf-8")
+    lines = text.count("\n") + 1
+    assert lines >= 20, (
+        f"dependency_graph.md が単一行に潰れている疑い (lines={lines}). "
+        f"`python -m visa_mcp.dev.ownership_check --graph-md "
+        f"docs/separation/dependency_graph.md` で再生成してください"
+    )
+    # 期待 section
+    for section in ("# Dependency Graph Report",
+                     "## Statistics",
+                     "## Owner counts"):
+        assert section in text, f"missing section: {section}"
+    assert "\r" not in text, "CR が混入 (LF のみで保存)"
+
+
+def test_module_ownership_statistics_match():
+    """v1.10.1 P1-4: module_ownership.yaml の statistics block が
+    実 manifest の owner 別 module count と一致していること"""
+    from collections import Counter
+    manifest_path = ROOT / "docs" / "separation" / "module_ownership.yaml"
+    data = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    stats = data.get("statistics") or {}
+    modules = data.get("modules") or {}
+    counter: Counter = Counter()
+    for info in modules.values():
+        owner = (info or {}).get("owner", "unknown")
+        counter[owner] += 1
+    expected = {
+        "lab_executor_mcp_count": counter.get("lab-executor-mcp", 0),
+        "visa_mcp_count": counter.get("visa-mcp", 0),
+        "split_count": counter.get("split", 0),
+        "shared_count": counter.get("shared", 0),
+    }
+    for key, want in expected.items():
+        got = stats.get(key)
+        assert got == want, (
+            f"statistics.{key}: manifest 宣言 {got} != "
+            f"実 owner count {want}")
+
+
+def test_module_ownership_yaml_not_collapsed():
+    """v1.10.1 P0-1: module_ownership.yaml / split_manifest.yaml が
+    multi-line で保存されている"""
+    for rel in ("docs/separation/module_ownership.yaml",
+                "docs/separation/split_manifest.yaml"):
+        p = ROOT / rel
+        text = p.read_text(encoding="utf-8")
+        lines = text.count("\n") + 1
+        assert lines >= 30, (
+            f"{rel} が圧縮されている疑い (lines={lines})")
+        assert "\r" not in text, f"{rel} に CR が混入"
 
 
 def test_ownership_check_cli_exit_zero(tmp_path):

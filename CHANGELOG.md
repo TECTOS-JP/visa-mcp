@@ -1,5 +1,150 @@
 # 変更履歴
 
+## v1.9.0 — Instrument Quality + Separation Boundary Smoke Tests
+
+合言葉: **「scaffold した instrument を tested / verified へ昇格させら
+れる品質か診断する」+「v2.0 分離に向けて、これ以上依存を悪化させない」**
+
+ロードマップ v6 の Phase A (分離前最終仕上げ) の **最初のリリース**。
+MCP tool 追加ゼロ、Stable 43 / Experimental 7 / 合計 50 不変。
+
+### P0: `validate instrument --strict` 強化
+
+新 strict checks (`validate instrument <path> --strict` でのみ有効):
+
+| error_class | 条件 |
+|-------------|------|
+| `instrument_manual_ref_todo` | `metadata.manual_ref` に "TODO" / "TBD" / "FIXME" / "URL or document" placeholder 残存 |
+| `instrument_missing_safe_shutdown` | 出力系 instrument で `safe_shutdown` 未定義 |
+| `instrument_missing_safety_ratings` | 出力系 instrument で `safety.ratings` 未定義 / 空 |
+| `instrument_missing_verify` | state 変更系 set command (set_voltage / set_current / set_output / set_temperature / set_frequency 等) に `verify` 未定義 |
+| `instrument_verified_missing_evidence` | `support_level=verified` だが `metadata.validation_evidence` 空 |
+
+#### 設計判断 (P1 反映)
+
+- `instrument_missing_verify` は **state 変更系の prefix list** で限定。
+  `set_display_brightness` / `set_beep` / `reset` / `clear_error` 等の
+  auxiliary write は除外
+- `_STATE_CHANGING_PREFIXES`: `set_voltage` / `set_current` /
+  `set_output` / `set_temperature` / `set_frequency` /
+  `set_amplitude` / `set_range` / `set_mode` / `set_setpoint` /
+  `set_pressure` / `set_flow` / `set_speed`
+- error message に `suggested_readback_command` を含める
+  (`set_voltage` → `query_voltage` / `measure_voltage` を自動推定)
+
+#### 出力系 category 判定 + alias
+
+- `OUTPUT_CAPABLE_CATEGORIES`: `power_supply` / `smu` /
+  `function_generator` / `electronic_load` /
+  `temperature_controller` / `heater` / `actuator`
+- `CATEGORY_ALIASES`: `multimeter` → `dmm` / `psu` → `power_supply` /
+  `function_gen` / `fg` → `function_generator` / `eload` →
+  `electronic_load` / `tc` → `temperature_controller`
+- `normalize_category()` public helper
+
+### P0: Separation Boundary Smoke Tests
+
+**新規 module** `src/visa_mcp/dev/dependency_report.py`:
+
+```bash
+python -m visa_mcp.dev.dependency_report
+python -m visa_mcp.dev.dependency_report --json
+```
+
+- runtime 候補 module 10 個の **top-level import** だけを AST で集計
+- `visa_mcp.visa_manager` / `pyvisa` の直接 import を検出
+- 関数内 lazy import は許容 (例:
+  `testing/mock_instruments.py` の VISA timeout error 互換 raise)
+
+**新規 test** `tests/test_separation_boundary.py` (14 件):
+
+- clean subprocess で runtime module を import し、`sys.modules` に
+  `pyvisa` が漏れないことを確認
+- AST で top-level の `visa_manager` / `pyvisa` 直接 import 検出
+- 各 runtime 候補 module の in-process import 可能性
+- `dependency_report --json` の clean subprocess 実行
+
+### P0: pyvisa-not-installed CI
+
+**新規** `.github/workflows/ci.yml` (3 job 構成):
+
+- `test`: pyvisa あり + 全 suite (hardware 除外)
+- **`pyvisa-not-installed`**: pyvisa を uninstall した状態で runtime
+  module import / `dependency_report` / `test_separation_boundary.py` /
+  validate / catalog CLI smoke を実行
+- `lint`: repo 全体の LF / multi-line guard
+
+### P1: `extension doctor` instrument quality summary
+
+`doctor_extension()` の `summary` に **`instrument_quality`** subdict
+を追加:
+
+```json
+{
+  "instrument_quality": {
+    "total": 5,
+    "strict_passed": 3,
+    "strict_failed": 2,
+    "missing_verify_commands": 4,
+    "missing_safe_shutdown_instruments": 1,
+    "manual_ref_todo_instruments": 2
+  }
+}
+```
+
+### P1: `visa-mcp instrument promote-check` (minimal)
+
+```bash
+visa-mcp instrument promote-check <path> --target tested|verified [--json]
+```
+
+- 内部的に `validate_instrument_file(strict=True)` を再利用
+- `eligible: true/false` + `blocking_issues` + `recommended_actions` を返却
+- 下方移動 (verified → tested 等) は即 eligible
+- `target=verified` のみ `validation_evidence` 必須を追加
+
+### 新規 API
+
+- `visa_mcp.registry.normalize_category(category)` → str
+- `visa_mcp.registry.OUTPUT_CAPABLE_CATEGORIES` / `CATEGORY_ALIASES`
+- `visa_mcp.registry.validate_instrument_file(path, *, strict=False)`
+  (新 keyword)
+- `visa_mcp.instrument_authoring.promote_check_instrument(path, *,
+  target)` → `PromoteCheckResult`
+- `python -m visa_mcp.dev.dependency_report`
+
+### 新規 docs
+
+- **`docs/separation/notes.md`** (v1.10 で機械可読 manifest に昇格予定):
+  v1.9 で固定した境界 / v2.0 分割の最終ゴール / PDF extractor extras
+  candidate / install path 段階移行 / tool registration boundary
+
+### 新規 error_class
+
+- `instrument_manual_ref_todo`
+- `instrument_missing_verify`
+- `instrument_missing_safe_shutdown`
+- `instrument_missing_safety_ratings`
+- `instrument_verified_missing_evidence`
+
+### 互換性
+
+- `validate_instrument_file` の signature: `strict` は keyword-only で
+  default `False`。既存呼び出しは無変更で動く
+- 既存 lint warnings は不変
+- MCP tool / DSL / extension pack 形式すべて不変
+- Stable 43 / Experimental 7 / 合計 50 不変
+
+### v1.9 で **やらないこと** (v1.10〜v1.11 へ)
+
+- backend adapter 実体化 (v1.11)
+- `module_ownership.yaml` 機械可読版 (v1.10)
+- `instrument review-report` フル機能 (v1.10)
+- import 違反の根本 refactor (v1.11)
+- PyVISA を base install から外す (v2.0)
+
+---
+
 ## v1.8.1 — v1.8.0 レビュー応答 (template 外部化 / dmm 統一 / .bak / rollback test)
 
 合言葉: **「template を読める形にし、authoring の事故を防ぐ」**

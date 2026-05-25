@@ -579,10 +579,19 @@ def doctor_extension(
 
     # 5. instrument validation_evidence (verified なら必須)
     missing_evidence: list[str] = []
+    # v1.9: 各 instrument に対して strict validate を集計
+    from visa_mcp.registry import validate_instrument_file
+    instr_strict_passed = 0
+    instr_strict_failed = 0
+    missing_verify_commands = 0
+    missing_safe_shutdown_instr = 0
+    manual_ref_todo_instr = 0
+    instr_total = 0
     for rel in (manifest.get("contents") or {}).get("instruments") or []:
         ip = pack_dir / rel
         if not ip.exists():
             continue
+        instr_total += 1
         try:
             idata = yaml.safe_load(ip.read_text(encoding="utf-8")) or {}
         except Exception:
@@ -591,6 +600,25 @@ def doctor_extension(
         if md.get("support_level") == "verified" and not (
                 md.get("validation_evidence") or {}):
             missing_evidence.append(rel)
+        # strict validate
+        try:
+            inst_rep = validate_instrument_file(ip, strict=True)
+        except Exception:
+            inst_rep = None
+        if inst_rep is None:
+            continue
+        if inst_rep.errors:
+            instr_strict_failed += 1
+            for e in inst_rep.errors:
+                ec = e.get("error_class", "")
+                if ec == "instrument_missing_verify":
+                    missing_verify_commands += 1
+                elif ec == "instrument_missing_safe_shutdown":
+                    missing_safe_shutdown_instr += 1
+                elif ec == "instrument_manual_ref_todo":
+                    manual_ref_todo_instr += 1
+        else:
+            instr_strict_passed += 1
 
     # 6. recommended_actions
     if not has_readme:
@@ -647,6 +675,15 @@ def doctor_extension(
         "ready_for_registry_review": (
             package_ok and not rep.errors and not has_strict_problems
         ),
+        # v1.9: instrument quality summary
+        "instrument_quality": {
+            "total": instr_total,
+            "strict_passed": instr_strict_passed,
+            "strict_failed": instr_strict_failed,
+            "missing_verify_commands": missing_verify_commands,
+            "missing_safe_shutdown_instruments": missing_safe_shutdown_instr,
+            "manual_ref_todo_instruments": manual_ref_todo_instr,
+        },
     }
 
     if rep.errors:

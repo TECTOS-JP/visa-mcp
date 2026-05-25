@@ -19,6 +19,71 @@ logger = logging.getLogger(__name__)
 
 SUPPORT_LEVELS = ("verified", "tested", "experimental", "draft")
 
+# v1.9: 出力系 instrument category (safe_shutdown 必須 / state 変更系
+# command の verify 必須)
+OUTPUT_CAPABLE_CATEGORIES = (
+    "power_supply",
+    "smu",
+    "function_generator",
+    "electronic_load",
+    "temperature_controller",
+    "heater",
+    "actuator",
+)
+
+# v1.9: category alias (CLI / metadata 表記揺れの正規化)
+CATEGORY_ALIASES = {
+    "multimeter": "dmm",
+    "digital_multimeter": "dmm",
+    "psu": "power_supply",
+    "function_gen": "function_generator",
+    "fg": "function_generator",
+    "eload": "electronic_load",
+    "tc": "temperature_controller",
+}
+
+
+def normalize_category(category: str) -> str:
+    """v1.9: category alias を正規化"""
+    if not category:
+        return ""
+    return CATEGORY_ALIASES.get(category.lower(), category.lower())
+
+
+# v1.9: state 値を変更する set 系 command の prefix (strict で verify 必須)
+_STATE_CHANGING_PREFIXES = (
+    "set_voltage", "set_current", "set_output",
+    "set_temperature", "set_frequency", "set_amplitude",
+    "set_range", "set_mode", "set_setpoint",
+    "set_pressure", "set_flow", "set_speed",
+)
+
+# v1.9: TODO placeholder 検出
+_MANUAL_REF_TODO_PATTERNS = (
+    "todo", "tbd", "fixme",
+    "url or document",  # scaffold が入れる placeholder の特徴文字列
+)
+
+
+def _manual_ref_contains_todo(value: Any) -> bool:
+    """v1.9: manual_ref に TODO 系 placeholder が残っているか判定"""
+    import json as _json
+    if value is None:
+        return False
+    text = value if isinstance(value, str) else _json.dumps(
+        value, ensure_ascii=False)
+    text_lower = text.lower()
+    return any(p in text_lower for p in _MANUAL_REF_TODO_PATTERNS)
+
+
+def _is_state_changing_command(name: str) -> bool:
+    n = name.lower()
+    if any(n.startswith(p) for p in _STATE_CHANGING_PREFIXES):
+        return True
+    # 一般的な set_* (display 等の見た目変更は除外したいので
+    # _STATE_CHANGING_PREFIXES でフィルタ済み)
+    return False
+
 
 # ============================================================
 # Registry index
@@ -83,8 +148,31 @@ class ValidationReport:
         }
 
 
-def validate_instrument_file(path: str | Path) -> ValidationReport:
-    """機器定義 YAML を Pydantic schema + lint で検証"""
+def validate_instrument_file(
+    path: str | Path,
+    *,
+    strict: bool = False,
+) -> ValidationReport:
+    """機器定義 YAML を Pydantic schema + lint で検証
+
+    v1.9: `strict=True` で以下が error 化される (registry 掲載 / CI /
+    release 前検査向け):
+
+    - `metadata.manual_ref` に TODO / TBD / FIXME placeholder 残存
+      → `instrument_manual_ref_todo`
+    - 出力系 instrument (category が `OUTPUT_CAPABLE_CATEGORIES` に
+      含まれる) で `safe_shutdown` 未定義
+      → `instrument_missing_safe_shutdown`
+    - 出力系 instrument で `safety.ratings` 未定義 / 空
+      → `instrument_missing_safety_ratings`
+    - state 変更系 set command (`set_voltage` / `set_current` /
+      `set_output` / `set_temperature` 等) に `verify` 未定義
+      → `instrument_missing_verify`
+    - `support_level=verified` だが `metadata.validation_evidence` 空
+      → `instrument_verified_missing_evidence`
+
+    通常 (`strict=False`) では既存 warning のみ。
+    """
     rep = ValidationReport(file=str(path), schema="instrument.schema.json")
     p = Path(path)
     if not p.exists():
@@ -172,10 +260,104 @@ def validate_instrument_file(path: str | Path) -> ValidationReport:
                     "field_path": f"commands.{name}.verify",
                 })
 
+    # ============================================================
+    # v1.9: strict mode 追加検査
+    # ============================================================
+    if strict:
+        normalized_category = normalize_category(md.category or "")
+        is_output_capable = normalized_category in OUTPUT_CAPABLE_CATEGORIES
+
+        # 1. manual_ref TODO 残存
+        if _manual_ref_contains_todo(md.manual_ref):
+            rep.errors.append({
+                "error_class": "instrument_manual_ref_todo",
+                "message": (
+                    f"(strict) metadata.manual_ref に TODO 系 placeholder "
+                    f"が残存: {md.manual_ref!r}"
+                ),
+                "field_path": "metadata.manual_ref",
+                "details": {"manual_ref": md.manual_ref},
+            })
+
+        # 2. 出力系 instrument の safe_shutdown 必須
+        if is_output_capable and not has_shutdown:
+            rep.errors.append({
+                "error_class": "instrument_missing_safe_shutdown",
+                "message": (
+                    f"(strict) 出力系 instrument (category="
+                    f"{normalized_category!r}) で safe_shutdown が未定義"
+                ),
+                "field_path": "safe_shutdown",
+                "details": {
+                    "category": normalized_category,
+                    "category_raw": md.category,
+                },
+            })
+
+        # 3. 出力系 instrument の safety.ratings 必須
+        if is_output_capable:
+            ratings = (defn.safety.ratings or {}) if defn.safety else {}
+            if not ratings:
+                rep.errors.append({
+                    "error_class": "instrument_missing_safety_ratings",
+                    "message": (
+                        f"(strict) 出力系 instrument (category="
+                        f"{normalized_category!r}) で safety.ratings が"
+                        "未定義"
+                    ),
+                    "field_path": "safety.ratings",
+                    "details": {"category": normalized_category},
+                })
+
+        # 4. state 変更 set 系 command の verify 必須
+        # (display / beep / reset / clear 等の auxiliary write は除外)
+        for name, cmd in defn.commands.items():
+            if getattr(cmd, "type", "") != "write":
+                continue
+            if not _is_state_changing_command(name):
+                continue
+            if cmd.verify is None:
+                # readback 候補を推測 (set_voltage → query_voltage)
+                guess = None
+                if name.startswith("set_"):
+                    suffix = name[4:]
+                    for cand in (f"query_{suffix}", f"measure_{suffix}"):
+                        if cand in defn.commands:
+                            guess = cand
+                            break
+                rep.errors.append({
+                    "error_class": "instrument_missing_verify",
+                    "message": (
+                        f"(strict) state 変更 command '{name}' に verify "
+                        "が未定義。read-back tolerance を設定するか、"
+                        "device が readback 不可なら明示的に除外"
+                    ),
+                    "field_path": f"commands.{name}.verify",
+                    "details": {
+                        "command": name,
+                        "suggested_readback_command": guess,
+                    },
+                })
+
+        # 5. support_level=verified なのに validation_evidence 空
+        if md.support_level == "verified":
+            ev = md.validation_evidence or {}
+            if not ev:
+                rep.errors.append({
+                    "error_class": "instrument_verified_missing_evidence",
+                    "message": (
+                        "(strict) support_level=verified だが "
+                        "metadata.validation_evidence が空"
+                    ),
+                    "field_path": "metadata.validation_evidence",
+                })
+
     if not rep.errors and rep.warnings:
         rep.status = "warning"
     elif not rep.errors and not rep.warnings:
         rep.status = "ok"
+    else:
+        rep.status = "error"
     return rep
 
 

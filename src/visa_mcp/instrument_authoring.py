@@ -46,6 +46,160 @@ logger = logging.getLogger(__name__)
 
 CATEGORIES = ("power_supply", "dmm", "temperature_meter", "generic_scpi")
 
+# v1.9: support_level 昇格判定で参照する order
+_SUPPORT_LEVEL_ORDER = ["draft", "experimental", "tested", "verified"]
+
+
+@dataclass
+class PromoteCheckResult:
+    """v1.9: instrument promote-check minimal 結果"""
+    status: str = "ok"  # ok / warning / error
+    file: str = ""
+    current_support_level: str = ""
+    target_support_level: str = ""
+    eligible: bool = False
+    blocking_issues: list[dict[str, Any]] = field(default_factory=list)
+    recommended_actions: list[dict[str, Any]] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "file": self.file,
+            "current_support_level": self.current_support_level,
+            "target_support_level": self.target_support_level,
+            "eligible": self.eligible,
+            "blocking_issues": list(self.blocking_issues),
+            "recommended_actions": list(self.recommended_actions),
+        }
+
+
+def promote_check_instrument(
+    path: str | Path,
+    *,
+    target: str = "tested",
+) -> PromoteCheckResult:
+    """v1.9: instrument YAML が `target` support_level に昇格してよいか
+    診断する **minimal** helper。内部的には
+    `validate_instrument_file(strict=True)` を再利用する。
+
+    target=`tested`:
+      - strict validate を通る (manual_ref TODO 無し / verify / safe_shutdown
+        / safety.ratings 揃い)
+    target=`verified`:
+      - target=tested を満たし、かつ `metadata.validation_evidence` が
+        非空
+    """
+    from visa_mcp.registry import (
+        validate_instrument_file, SUPPORT_LEVELS,
+    )
+    res = PromoteCheckResult(file=str(path), target_support_level=target)
+
+    if target not in SUPPORT_LEVELS:
+        res.status = "error"
+        res.blocking_issues.append({
+            "issue": "invalid_target",
+            "message": (
+                f"target={target!r} は {list(SUPPORT_LEVELS)} のいずれか"
+            ),
+        })
+        return res
+
+    p = Path(path).expanduser()
+    if not p.exists():
+        res.status = "error"
+        res.blocking_issues.append({
+            "issue": "not_found",
+            "message": f"file not found: {p}",
+        })
+        return res
+
+    try:
+        data = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+    except Exception as e:
+        res.status = "error"
+        res.blocking_issues.append({
+            "issue": "schema_invalid",
+            "message": str(e),
+        })
+        return res
+
+    md = data.get("metadata") or {}
+    current = md.get("support_level", "draft")
+    res.current_support_level = current
+
+    # 下方移動 (verified → tested 等) は明確に許可
+    if (current in _SUPPORT_LEVEL_ORDER and target in _SUPPORT_LEVEL_ORDER
+            and _SUPPORT_LEVEL_ORDER.index(target)
+            <= _SUPPORT_LEVEL_ORDER.index(current)):
+        res.eligible = True
+        return res
+
+    # strict validate
+    val = validate_instrument_file(p, strict=True)
+    blocking = []
+    for e in val.errors:
+        blocking.append({
+            "issue": e.get("error_class", "strict_error"),
+            "message": e.get("message", ""),
+            "field_path": e.get("field_path", ""),
+            "details": e.get("details") or {},
+        })
+
+    # target=verified の追加条件
+    if target == "verified":
+        ev = md.get("validation_evidence") or {}
+        if not ev:
+            blocking.append({
+                "issue": "instrument_verified_missing_evidence",
+                "message": (
+                    "target=verified には metadata.validation_evidence "
+                    "(非空) が必要"
+                ),
+                "field_path": "metadata.validation_evidence",
+            })
+
+    res.blocking_issues = blocking
+    res.eligible = not blocking
+
+    # recommended_actions (strict_validate と同一情報の簡易要約)
+    for b in blocking:
+        cls = b["issue"]
+        if cls == "instrument_manual_ref_todo":
+            res.recommended_actions.append({
+                "action": "fill_manual_ref",
+                "reason": "Replace TODO with actual manual / URL reference",
+            })
+        elif cls == "instrument_missing_safe_shutdown":
+            res.recommended_actions.append({
+                "action": "add_safe_shutdown",
+                "reason": "Output-capable instrument requires safe_shutdown",
+            })
+        elif cls == "instrument_missing_safety_ratings":
+            res.recommended_actions.append({
+                "action": "add_safety_ratings",
+                "reason": "Define voltage / current ratings",
+            })
+        elif cls == "instrument_missing_verify":
+            res.recommended_actions.append({
+                "action": "add_verify",
+                "reason": (
+                    f"Add verify (readback) to "
+                    f"{b.get('details', {}).get('command', 'command')}"
+                ),
+            })
+        elif cls == "instrument_verified_missing_evidence":
+            res.recommended_actions.append({
+                "action": "add_validation_evidence",
+                "reason": (
+                    "Fill metadata.validation_evidence (tested_by / "
+                    "tested_at / interface / firmware / tested_items)"
+                ),
+            })
+
+    if blocking:
+        res.status = "warning"  # error ではなく blocking を warning 扱い
+    return res
+
 
 # ============================================================
 # Templates (multi-line YAML strings)

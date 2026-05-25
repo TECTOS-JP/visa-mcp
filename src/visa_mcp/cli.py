@@ -84,7 +84,9 @@ def cmd_validate(args: argparse.Namespace) -> int:
     path = Path(args.path) if args.path else None
 
     if target == "instrument":
-        rep = reg.validate_instrument_file(path).to_dict()
+        # v1.9: --strict 対応
+        strict = bool(getattr(args, "strict", False))
+        rep = reg.validate_instrument_file(path, strict=strict).to_dict()
         return _emit([rep], args.json)
     if target == "system":
         rep = reg.validate_system_config_file(path).to_dict()
@@ -490,6 +492,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     inst_sc.add_argument("--json", action="store_true")
     inst_sc.set_defaults(func=cmd_instrument)
+
+    # v1.9: promote-check
+    inst_pc = inst_sub.add_parser(
+        "promote-check",
+        help=(
+            "(v1.9) instrument YAML が target support_level に昇格して "
+            "よいか診断 (strict validate を再利用)"
+        ),
+    )
+    inst_pc.add_argument("path", help="instrument YAML の path")
+    inst_pc.add_argument(
+        "--target", default="tested",
+        choices=["draft", "experimental", "tested", "verified"],
+        help="昇格目標 (default: tested)",
+    )
+    inst_pc.add_argument("--json", action="store_true")
+    inst_pc.set_defaults(func=cmd_instrument)
 
     # v1.4: registry overlay
     reg = sub.add_parser(
@@ -991,6 +1010,25 @@ def cmd_instrument(args: argparse.Namespace) -> int:
                 print("  next: visa-mcp validate instrument "
                       f"{data['output_path']}")
         return 0 if data["status"] == "ok" else 1
+
+    if args.inst_command == "promote-check":
+        from visa_mcp.instrument_authoring import promote_check_instrument
+        res = promote_check_instrument(args.path, target=args.target)
+        data = res.to_dict()
+        if args.json:
+            print(json.dumps({"promote_check": data},
+                              ensure_ascii=False, indent=2, default=str))
+        else:
+            icon = "[OK]" if data["eligible"] else "[NO]"
+            print(f"{icon} promote-check {data['file']} "
+                  f"({data['current_support_level']} -> "
+                  f"{data['target_support_level']})")
+            print(f"  eligible: {data['eligible']}")
+            for b in data["blocking_issues"]:
+                print(f"  BLOCK  {b.get('issue')}: {b.get('message')}")
+            for a in data["recommended_actions"]:
+                print(f"  fix?   {a['action']}: {a['reason']}")
+        return 0 if data["eligible"] else 1
 
     print(f"unknown instrument sub-command: {args.inst_command}",
           file=sys.stderr)

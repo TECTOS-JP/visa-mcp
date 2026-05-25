@@ -219,7 +219,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "lab-executor-mcp"
-version = "2.0.0-rc1"
+version = "2.0.0-rc2"
 description = "Backend-independent experiment execution runtime for AI agents (split from visa-mcp v1.11)"
 readme = "README.md"
 license = { text = "MIT" }
@@ -548,6 +548,88 @@ v2.0 では MCP tool / DSL / extension pack 形式を変えていない。
     # ターンで対応する
 
 
+def write_cli(dst_root: Path) -> None:
+    """v2.0.0-rc2: minimal lab-executor CLI を生成。
+    `pyproject.toml` の `[project.scripts] lab-executor = lab_executor.cli:main`
+    が module 不在で壊れないようにする。"""
+    cli_path = dst_root / "src" / "lab_executor" / "cli.py"
+    if cli_path.exists():
+        return  # 既に手動で patch 済みなら維持
+    content = '''"""lab-executor CLI (v2.0.0-rc2).
+
+v2.0.0 では minimal CLI を提供する。v1.x の `visa-mcp` CLI と機能互換
+にするのは v2.1+ の段階的作業。
+"""
+from __future__ import annotations
+import argparse
+import sys
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="lab-executor",
+        description=(
+            "lab-executor-mcp: backend-independent experiment execution "
+            "runtime CLI (v2.0). PyVISA backend が必要な操作は "
+            "`visa-mcp` CLI を使ってください。"
+        ),
+    )
+    parser.add_argument("--version", action="store_true")
+    sub = parser.add_subparsers(dest="command")
+    sp_serve = sub.add_parser("serve")
+    sp_serve.add_argument("--backend", default="mock",
+                          choices=["mock"])
+    sp_val = sub.add_parser("validate")
+    sp_val.add_argument("target", nargs="?",
+                        choices=["instrument", "plan", "extension",
+                                 "benchmark"])
+    sp_val.add_argument("path", nargs="?")
+    sp_val.add_argument("--strict", action="store_true")
+    sp_val.add_argument("--json", action="store_true")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+    if args.version:
+        import lab_executor
+        print(f"lab-executor-mcp {lab_executor.__version__}")
+        return 0
+    if args.command == "serve":
+        print("lab-executor serve: v2.1 で MCP server を有効化します。",
+              file=sys.stderr)
+        return 2
+    if args.command == "validate":
+        if args.target == "instrument" and args.path:
+            from lab_executor.registry import validate_instrument_file
+            rep = validate_instrument_file(args.path, strict=args.strict)
+            if args.json:
+                import json
+                print(json.dumps(rep.to_dict(), ensure_ascii=False,
+                                  indent=2, default=str))
+            else:
+                print(f"errors: {len(rep.errors)}")
+                for e in rep.errors:
+                    print(f"  - {e.get('error_class')}: "
+                          f"{e.get('message')}")
+            return 0 if not rep.errors else 1
+        print("lab-executor validate: v2.1 で port 予定。",
+              file=sys.stderr)
+        return 2
+    if args.command is None:
+        parser.print_help()
+        return 0
+    print(f"unknown subcommand: {args.command}", file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+'''
+    cli_path.write_text(content, encoding="utf-8")
+
+
 def write_init(dst_root: Path) -> None:
     content = '''"""lab-executor-mcp: backend-independent experiment execution
 runtime for AI agents.
@@ -669,8 +751,9 @@ def main(argv: list[str] | None = None) -> int:
         transform_py=True, lab_modules=lab_modules,
     )
 
-    # === 4) __init__.py (top-level package) ===
+    # === 4) __init__.py (top-level package) + cli.py ===
     write_init(dst_root)
+    write_cli(dst_root)
 
     # === 5) pyproject / README / CHANGELOG / CI / migration guide ===
     write_pyproject(dst_root)

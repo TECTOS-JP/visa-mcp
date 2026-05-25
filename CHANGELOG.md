@@ -1,5 +1,65 @@
 # 変更履歴
 
+## v1.11.1 — v1.11.0 レビュー応答 (docstring / split_rehearsal AST verify / docs 補強)
+
+合言葉: **「v2.0 直前の境界 docs を v1.11 実体化状態に揃える」**
+
+v1.11.0 external review (P0/P1) を反映した patch release。
+public API / CLI 引数 / schema / MCP tool 一覧すべて不変。
+
+### 変更点
+
+- **P1-1** (`src/visa_mcp/backends/base.py`): Protocol docstring を
+  v1.1 spike 表現から **v1.11 実体化状態** に書き換え。`PyVisaBackend`
+  / `MockBackend` の位置づけ、Protocol が最小に留まる理由、`timeout_ms`
+  / termination 引数を v2.0 公開境界として採用する旨を明記
+- **P1-3** (`tests/test_v111_separation_refactor.py`):
+  PyVisaBackend の **import** と **instance 生成** のテスト責務を分離
+  - `test_pyvisa_backend_module_imports_without_instantiating`:
+    module import が PyVISA 不要で成功すること
+  - `test_pyvisa_backend_class_satisfies_protocol_shape`: class
+    structural shape のみ確認 (`__new__` を使った曖昧な instance
+    check を廃止)
+- **P1-4** (`src/visa_mcp/dev/split_rehearsal.py`): `verify_candidate()`
+  関数 + `--verify` CLI flag を追加。candidate tree を:
+  - 全 `*.py` を `ast.parse` で構文検証
+  - `visa_mcp.<lab module>` 文字列の rewrite 漏れを再走査
+  対応 test: `test_split_rehearsal_verify_candidate` /
+  `test_split_rehearsal_cli_verify_flag`
+- **P1-5** (`docs/separation/module_ownership.yaml`): 先頭コメントを
+  `v1.10.0, draft for v2.0 split` → `v1.11.1, split rehearsal ready`
+  に更新。v1.10/v1.11 の達成を明記
+- **P1-6** (`docs/raw_visa.md`): import path deprecation 文言を
+  「v2.2 で削除」→「v2.2 以降の削除候補 (実利用状況を見て判断)」に
+  softening
+- **P1-7** (`docs/raw_visa.md` 追記): `MockBackend` / `MockVisaManager`
+  naming 方針 (public は `MockBackend`、`MockVisaManager` は legacy
+  internal、v2.1+ で rename 検討) を memo 追加
+- **P0-2** (`tests/test_v111_separation_refactor.py` 追加 2 件):
+  - `test_v111_new_files_covered_by_format_guard`: v1.11 新規 7 file
+    が repo-wide `SWEEP_PATTERNS` でカバーされる
+  - `test_v111_new_files_are_multiline`: 30 行以上 + LF only 確認
+
+### tests
+
+- 全 test: **1538 passing** (v1.11.0 比 +5)
+
+### 互換性
+
+- MCP tool 数 / DSL schema / extension pack 形式: 不変
+- `InstrumentBackend` Protocol shape: 不変
+  (docstring と docs のみ更新)
+- `split_rehearsal` の既存 CLI: 不変 (`--verify` flag を追加のみ)
+
+### v2.0.0-rc1 へ (preview)
+
+v1.11.1 で v2.0 直前の docs / verify が揃った。次は:
+- feature freeze
+- `git filter-repo` dry-run + wheel build verification
+  (lab-executor-mcp wheel が PyVISA 非依存であること確認)
+- `docs/v2_migration.md` draft
+- 利用者用 install path / extension pack 互換 smoke test
+
 ## v1.11.0 — Separation Refactor + Split Rehearsal
 
 合言葉: **「分離はまだしない。ただし、分離しても壊れないことを CI で

@@ -32,22 +32,23 @@ def test_instrument_backend_protocol_runtime_checkable():
     assert InstrumentBackend._is_runtime_protocol is True
 
 
-def test_pyvisa_backend_satisfies_protocol():
-    from visa_mcp.backends import InstrumentBackend, PyVisaBackend
-    # 実 instance を作らずに class level で structural check
+def test_pyvisa_backend_module_imports_without_instantiating():
+    """v1.11.1 (P1-3): import と instance 生成を分離。
+    PyVisaBackend module の import そのものは PyVISA 不要で成功する
+    (型注釈は TYPE_CHECKING 内、内部の VisaManager 生成は __init__
+    で初めて起こる)。"""
+    import importlib
+    mod = importlib.import_module("visa_mcp.backends.pyvisa_backend")
+    assert hasattr(mod, "PyVisaBackend")
+
+
+def test_pyvisa_backend_class_satisfies_protocol_shape():
+    """class level の structural shape check (instance を作らない)"""
+    from visa_mcp.backends import PyVisaBackend
     for name in ("backend_id", "list_resources", "query", "write",
                   "close"):
         assert hasattr(PyVisaBackend, name), (
             f"PyVisaBackend missing {name}")
-    # runtime_checkable 判定 (instance 化を試みる)
-    try:
-        b = PyVisaBackend.__new__(PyVisaBackend)
-        b.backend_id = "pyvisa"
-        b._visa = None  # type: ignore
-        assert isinstance(b, InstrumentBackend)
-    except Exception as e:
-        # 構造的に揃っていれば OK (instance check 失敗は許容)
-        pass
 
 
 def test_mock_backend_satisfies_protocol():
@@ -235,3 +236,78 @@ def test_backends_init_exposes_adapters():
     assert hasattr(backends, "InstrumentBackend")
     assert hasattr(backends, "PyVisaBackend")
     assert hasattr(backends, "MockBackend")
+
+
+def test_split_rehearsal_verify_candidate(tmp_path):
+    """v1.11.1 (P1-4): verify_candidate が AST parse + leftover 検査
+    を実行し、生成直後の candidate に対し OK を返す"""
+    from visa_mcp.dev.split_rehearsal import (
+        generate_candidate, verify_candidate,
+    )
+    out = tmp_path / "cand_verify"
+    generate_candidate(out)
+    rep = verify_candidate(out)
+    assert rep["ok"], (
+        f"verify failed: parse_errors={rep['parse_errors'][:3]}, "
+        f"leftover={rep['leftover_visa_mcp'][:3]}")
+    assert rep["parse_ok_count"] >= 30
+
+
+def test_split_rehearsal_cli_verify_flag(tmp_path):
+    out = tmp_path / "cand_cli_verify"
+    res = subprocess.run(
+        [sys.executable, "-m", "visa_mcp.dev.split_rehearsal",
+         "--out", str(out), "--verify", "--json"],
+        cwd=str(ROOT),
+        capture_output=True, text=True,
+    )
+    assert res.returncode == 0, res.stderr
+    import json as _json
+    data = _json.loads(res.stdout)
+    assert "verify" in data
+    assert data["verify"]["ok"] is True
+
+
+def test_v111_new_files_covered_by_format_guard():
+    """v1.11.1 (P0-2): v1.11 で追加した新規 file が
+    repo-wide format guard (SWEEP_PATTERNS) でカバーされる"""
+    from tests.test_repo_format_guard import (
+        SWEEP_PATTERNS, _collect_files,
+    )
+    files = {str(p.relative_to(ROOT)).replace("\\", "/")
+             for p in _collect_files()}
+    must_cover = [
+        "src/visa_mcp/backends/base.py",
+        "src/visa_mcp/backends/pyvisa_backend.py",
+        "src/visa_mcp/backends/mock_backend.py",
+        "src/visa_mcp/dev/split_rehearsal.py",
+        "tests/test_v111_separation_refactor.py",
+        "docs/raw_visa.md",
+        "docs/separation/module_ownership.yaml",
+    ]
+    missing = [m for m in must_cover if m not in files]
+    assert not missing, (
+        f"format guard SWEEP_PATTERNS が以下を見ていない: {missing}")
+
+
+def test_v111_new_files_are_multiline():
+    """v1.11.1 (P0): v1.11 で追加した主要 file が multi-line
+    (>= 30 行) + LF only で保存されている"""
+    targets = [
+        "src/visa_mcp/backends/base.py",
+        "src/visa_mcp/backends/pyvisa_backend.py",
+        "src/visa_mcp/backends/mock_backend.py",
+        "src/visa_mcp/dev/split_rehearsal.py",
+        "tests/test_v111_separation_refactor.py",
+        "docs/raw_visa.md",
+    ]
+    failures: list[tuple[str, int, int]] = []
+    for rel in targets:
+        p = ROOT / rel
+        text = p.read_text(encoding="utf-8")
+        lines = text.count("\n") + 1
+        cr = text.count("\r")
+        if lines < 30 or cr:
+            failures.append((rel, lines, cr))
+    assert not failures, (
+        f"multiline 違反 (rel, lines, CR): {failures}")

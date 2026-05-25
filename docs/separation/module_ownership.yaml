@@ -1,8 +1,9 @@
-# Module Ownership Manifest (v1.10.0, draft for v2.0 split)
+# Module Ownership Manifest (v1.11.1, split rehearsal ready)
 #
 # v6 ロードマップ Phase A: 分離準備の **machine-readable source of truth**。
-# v1.10 で全 module を分類し、v1.11 で refactor、v2.0 で実際に
-# `git filter-repo` する。
+# v1.10 で全 module を分類、v1.11 で backend adapter 実体化 +
+# `KNOWN_V111_TO_RESOLVE = 0` 達成 + split_rehearsal 追加、v2.0 で
+# 実際に `git filter-repo` する。
 #
 # owners:
 #   lab-executor-mcp  ← runtime + 機器定義エコシステム (backend 非依存)

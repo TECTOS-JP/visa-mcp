@@ -125,13 +125,32 @@ pip install visa-mcp    # 自動的に lab-executor-mcp >= 2.0 も install
 pip install lab-executor-mcp
 ```
 
-import path の deprecation スケジュール:
+import path の deprecation スケジュール (目安、実 migration 状況で
+調整):
 
 ```
-v2.0: from visa_mcp.extension import ... が動く + DeprecationWarning
-v2.0: from lab_executor.extension import ... を推奨
-v2.2: 旧 import path 削除
+v2.0:        from visa_mcp.extension import ... が動く +
+             DeprecationWarning
+v2.0:        from lab_executor.extension import ... を推奨
+v2.1:        migration 状況 review
+v2.2+ 候補:  旧 import path 削除候補 (実利用状況を見て判断)
 ```
+
+「v2.2 で必ず削除」ではなく「v2.2 以降で削除候補」として扱う。
+利用者の lockfile / `.install_meta.json` / 実装コードが旧 import に
+依存している割合を v2.0 / v2.1 で観測してから断行する。
+
+## MockBackend / MockVisaManager の naming (v1.11.1 メモ)
+
+`MockBackend` は v2.0 で lab-executor-mcp 側へ移送される。内部で
+包む `MockVisaManager` は historical 名で、VISA 寄りに見えるが
+**legacy internal** として扱う。v2.0 では:
+
+- public: `from lab_executor.backends import MockBackend`
+- legacy internal: `MockVisaManager` は import 互換のために残るが、
+  docs / 推奨経路は `MockBackend` を前面に出す
+- v2.1+ 検討: `MockInstrumentManager` への rename 候補 (v2.0 breaking
+  change は避ける、v2.1 以降で議論)
 
 ## References
 

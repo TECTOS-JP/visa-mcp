@@ -1,4 +1,4 @@
-"""v1.11: Split Rehearsal (v2.0 git filter-repo 前の dry-run)
+"""v1.11 / v1.11.1: Split Rehearsal (v2.0 git filter-repo 前の dry-run)
 
 `module_ownership.yaml` と `split_manifest.yaml` を読み、tmp directory
 に `lab_executor_candidate/` ツリーを生成する。本体 package には混ぜず、
@@ -19,6 +19,7 @@ v1.11 では candidate は **正式 namespace ではない** (v2.0 で
 """
 from __future__ import annotations
 import argparse
+import ast
 import re
 import shutil
 import sys
@@ -157,6 +158,49 @@ def generate_candidate(out_dir: Path) -> dict[str, Any]:
     }
 
 
+def verify_candidate(out_dir: Path) -> dict[str, Any]:
+    """v1.11.1 (P1-4): 生成 candidate を AST 検証する。
+
+    - 全 *.py が `ast.parse` で構文エラー無く読める
+    - candidate 内に `visa_mcp.<lab module>` 文字列が残っていない
+      (rewrite 漏れ検出。ただし visa-mcp / shared owner module の
+      `visa_mcp.<...>` は許容)
+
+    Returns: {"parse_ok_count", "parse_errors", "leftover_visa_mcp"}
+    """
+    out_dir = Path(out_dir).resolve()
+    manifest = _load_manifest()
+    lab_modules = _classify_lab_executor_modules(manifest)
+    parse_errors: list[dict[str, str]] = []
+    leftover: list[dict[str, str]] = []
+    parse_ok = 0
+    for py in out_dir.rglob("*.py"):
+        text = py.read_text(encoding="utf-8")
+        # 1. AST parse
+        try:
+            ast.parse(text)
+            parse_ok += 1
+        except SyntaxError as e:
+            parse_errors.append({
+                "file": str(py.relative_to(out_dir)),
+                "error": f"{e.__class__.__name__}: {e}",
+            })
+        # 2. leftover lab-executor module import
+        for lab in lab_modules:
+            for pat in (f"from {lab}", f"import {lab}"):
+                if pat in text:
+                    leftover.append({
+                        "file": str(py.relative_to(out_dir)),
+                        "pattern": pat,
+                    })
+    return {
+        "parse_ok_count": parse_ok,
+        "parse_errors": parse_errors,
+        "leftover_visa_mcp": leftover,
+        "ok": (not parse_errors) and (not leftover),
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m visa_mcp.dev.split_rehearsal",
@@ -170,9 +214,15 @@ def main(argv: list[str] | None = None) -> int:
         help="生成先 directory (default: tmp/lab_executor_candidate)",
     )
     parser.add_argument("--json", action="store_true")
+    parser.add_argument(
+        "--verify", action="store_true",
+        help="v1.11.1: AST parse + leftover visa_mcp.<lab> 検査",
+    )
     args = parser.parse_args(argv)
 
     summary = generate_candidate(Path(args.out))
+    if args.verify:
+        summary["verify"] = verify_candidate(Path(args.out))
     if args.json:
         import json as _json
         print(_json.dumps(summary, ensure_ascii=False, indent=2))

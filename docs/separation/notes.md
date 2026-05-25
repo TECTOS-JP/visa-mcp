@@ -1,4 +1,23 @@
-# Separation Notes (v1.9, draft for v2.0 split)
+# Separation Notes (v1.9 → v1.10 更新, draft for v2.0 split)
+
+## v1.10 で追加した成果物
+
+- `docs/separation/module_ownership.yaml` (機械可読 manifest, 73
+  module 全分類、unclassified=0)
+- `docs/separation/split_manifest.yaml` (v2.0 で `git filter-repo`
+  する path の網羅リスト + rc1_gates)
+- `docs/separation/dependency_graph.md` (自動生成、
+  `python -m visa_mcp.dev.ownership_check --graph-md ...` で再生成)
+- `src/visa_mcp/dev/ownership_check.py` (CI gate: 未分類 module 検出
+  + 新規 lab→visa top-level violation 検出 + `KNOWN_V111_TO_RESOLVE`
+  registry。v1.11 で InstrumentBackend Protocol 経由化で解消する 10
+  件の既知 violation を tracking)
+- `visa-mcp instrument review-report` CLI (PR 用 markdown report、
+  strict validate + promote-check を集約)
+
+v1.11 では `KNOWN_V111_TO_RESOLVE` を 0 件まで削減することが gate。
+
+
 
 合言葉: **「v2.0 でリポジトリを分けるための、v1.9 から積む下準備
 メモ」**

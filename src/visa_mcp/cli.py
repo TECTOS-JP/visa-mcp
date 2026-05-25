@@ -510,6 +510,23 @@ def build_parser() -> argparse.ArgumentParser:
     inst_pc.add_argument("--json", action="store_true")
     inst_pc.set_defaults(func=cmd_instrument)
 
+    # v1.10: review-report
+    inst_rr = inst_sub.add_parser(
+        "review-report",
+        help=(
+            "(v1.10) instrument YAML を PR review 用 markdown report "
+            "に変換 (strict validate + promote-check 集約)"
+        ),
+    )
+    inst_rr.add_argument("path", help="instrument YAML の path")
+    inst_rr.add_argument(
+        "--output", default=None,
+        help="markdown 出力先 file path (未指定で stdout)",
+    )
+    inst_rr.add_argument("--json", action="store_true",
+                          help="JSON で {status, markdown, file} を出力")
+    inst_rr.set_defaults(func=cmd_instrument)
+
     # v1.4: registry overlay
     reg = sub.add_parser(
         "registry",
@@ -1029,6 +1046,24 @@ def cmd_instrument(args: argparse.Namespace) -> int:
             for a in data["recommended_actions"]:
                 print(f"  fix?   {a['action']}: {a['reason']}")
         return 0 if data["eligible"] else 1
+
+    if args.inst_command == "review-report":
+        from visa_mcp.instrument_authoring import review_report_instrument
+        res = review_report_instrument(args.path)
+        if args.json:
+            print(json.dumps({"review_report": res},
+                              ensure_ascii=False, indent=2, default=str))
+        else:
+            md = res["markdown"]
+            if args.output:
+                Path(args.output).write_text(md, encoding="utf-8")
+                icon = "[OK]" if res["status"] == "ok" else (
+                    "[WARN]" if res["status"] == "warning" else "[ERR]")
+                print(f"{icon} review-report {res['file']} -> "
+                      f"{args.output}")
+            else:
+                print(md)
+        return 0 if res["status"] != "error" else 1
 
     print(f"unknown instrument sub-command: {args.inst_command}",
           file=sys.stderr)

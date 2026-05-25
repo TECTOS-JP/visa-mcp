@@ -1,5 +1,81 @@
 # 変更履歴
 
+## v1.10.0 — Separation Readiness Audit + Instrument Review Workflow
+
+合言葉: **「分離前の最終仕上げ — module ownership を機械可読化し、
+v2.0 分離を git filter-repo で実行できる地点まで設計を固める」**
+
+ロードマップ v6 Phase A の 2 件目 (v1.9 → v1.10 → v1.11 → v2.0.0-rc1
+→ v2.0.0)。本 release で Stable / Experimental tool surface
+(43 + 7 = 50) は不変、DSL schema / extension pack 形式も完全互換。
+
+### 主な変更
+
+- **`docs/separation/module_ownership.yaml`** (新規, 機械可読 manifest):
+  - `src/visa_mcp/` 配下 73 module すべてを
+    `lab-executor-mcp` / `visa-mcp` / `split` / `shared` のいずれかに
+    分類 (unclassified = 0)
+  - `split` entry には `lab_executor_part` + `visa_mcp_part` を記述
+  - statistics: lab-executor-mcp 51 / visa-mcp 4 / split 7 / shared 2
+- **`docs/separation/split_manifest.yaml`** (新規):
+  - v2.0 で `git filter-repo` する path の網羅リスト
+  - `keep_in_visa_mcp` (visa_manager.py / bus_manager.py /
+    session_manager.py / tools/discovery.py)
+  - `split_files` (cli.py / tools/commands.py / step_executor.py /
+    recipe_executor.py / registry.py / server.py / __init__.py /
+    backends/) を v1.11 で split する方針を明記
+  - `rc1_gates`: v2.0.0-rc1 で満たすべき 8 項目 checklist
+- **`src/visa_mcp/dev/ownership_check.py`** (新規 CI gate):
+  - manifest と src/ 実体を照合 (未分類 module 検出)
+  - lab-executor owner module が visa-mcp owner module を
+    **top-level import** していないこと検査 (AST ベース)
+  - `LAZY_EXCEPTIONS` (関数内 lazy import の許容例外、
+    `testing/mock_instruments.py` 1 件)
+  - `KNOWN_V111_TO_RESOLVE` (v1.11 で InstrumentBackend Protocol
+    経由化により解消する **既知 10 件**を tracking。CI fail を防ぐが
+    新規追加禁止 / v1.11 で削減のみ)
+  - 使い方: `python -m visa_mcp.dev.ownership_check [--json]
+    [--graph-md docs/separation/dependency_graph.md]`
+- **`docs/separation/dependency_graph.md`** (自動生成):
+  - statistics / owner counts / NEW violations / known v1.11-to-resolve
+    の markdown レポート
+  - `ownership_check.py --graph-md` で再生成 (手で編集しない)
+- **`visa-mcp instrument review-report <path>`** CLI (新規):
+  - 1 instrument YAML → markdown 形式 PR review report
+  - `validate_instrument_file(strict=True)` +
+    `promote_check_instrument(target=tested)` +
+    `promote_check_instrument(target=verified)` を集約した「読み物」
+  - `--output <file.md>` で書き出し、`--json` で構造化出力
+  - `review_report_instrument(path)` Python API も提供
+- **`docs/separation/notes.md`** 更新:
+  - v1.10 の成果物 4 件を navigation 用に追記
+  - v1.11 で `KNOWN_V111_TO_RESOLVE` を 0 件に削減することを gate と
+    明記
+
+### tests
+
+- `tests/test_v110_separation_audit.py` (新規 12 件):
+  manifest 完全性 / NEW violation = 0 / KNOWN tracking /
+  split_manifest path 実在 / dependency graph 生成 /
+  ownership_check CLI exit=0 + JSON / review-report function +
+  missing file / review-report CLI markdown + JSON
+- 全 test: **1516 passing** (v1.9.1 比 +12)
+
+### 互換性
+
+- MCP tool 数: Stable 43 / Experimental 7 / 合計 50 (v1.0 から不変)
+- DSL `dsl_version=0.8` 完全互換
+- extension pack 形式 / `.install_meta.json` schema 完全互換
+- 新規 CLI (`instrument review-report`) は追加のみ、既存 CLI 無変更
+
+### v1.11 で取り組むこと (preview)
+
+- `InstrumentBackend` Protocol 実体化 + `PyVisaBackend` /
+  `MockBackend` adapter
+- `KNOWN_V111_TO_RESOLVE` 10 件を adapter 経由化で 0 へ
+- `step_executor.py` / `tools/commands.py` を runtime / backend に分割
+- `src/lab_executor_candidate/` 仮 namespace で split rehearsal
+
 ## v1.9.1 — v1.9.0 レビュー応答 (repo-wide format guard / docs 補強)
 
 合言葉: **「format guard を repo 全体に効かせ、v1.9 で追加した境界 /

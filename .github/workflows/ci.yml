@@ -54,7 +54,7 @@ jobs:
           python -m visa_mcp.cli extension catalog --packages examples/extensions/ --json > /dev/null || true
 
   lint:
-    name: format / multi-line guards
+    name: format / multi-line guards (repo-wide)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -66,5 +66,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e .
           pip install pytest pytest-asyncio pytest-mock pyvisa
-      - name: Run repo format tests
+      - name: Repo-wide format guard (v1.9.1 single source of truth)
+        # tests/test_repo_format_guard.py が repo 全体を sweep し、
+        # CR / 1-5 行潰れ / workflow YAML 形式を検査する
+        run: pytest tests/test_repo_format_guard.py -v
+      - name: Per-version format tests (legacy, parametrized lists)
         run: pytest -k "lf_only or multiline" -q

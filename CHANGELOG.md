@@ -1,5 +1,68 @@
 # 変更履歴
 
+## v1.9.1 — v1.9.0 レビュー応答 (repo-wide format guard / docs 補強)
+
+合言葉: **「format guard を repo 全体に効かせ、v1.9 で追加した境界 /
+昇格 / category の挙動をドキュメント化する」**
+
+v1.9.0 の external review (P0/P1/P2) を反映した patch release。
+public API / CLI 引数 / schema すべて不変。
+
+### 変更点
+
+- **P0-1 / P0-3**: **`tests/test_repo_format_guard.py`** 新規追加
+  - `src/**/*.py` / `tests/**/*.py` / `docs/**/*.md` /
+    `.github/workflows/**/*.yml` / `schemas/**/*.json` /
+    `registry/**/*.yaml` / `examples/**/*.yaml` /
+    `scripts/**/*.py` / `src/visa_mcp/templates/**/*.yaml` の
+    **repo 全体 sweep**
+  - CR 検出 + **5 行未満潰れ検出**を 1 file で集約 (version 別の
+    parametrize から CI lint job の single source of truth へ)
+  - `__init__.py` は default で除外、個別 file は
+    `MIN_LINES_EXCEPTIONS` で micro-tune 可
+- **P0-2**: CI workflow を `yaml.safe_load` で parse + 必須 keys
+  (`name` / `on` / `jobs`) と job 構成 (`test` / `pyvisa-not-installed`
+  / `lint`) を test 化。
+  `test_yaml_workflows_parse_correctly` /
+  `test_ci_workflow_includes_pyvisa_not_installed_job` で回帰防止
+- **CI lint job 強化** (`.github/workflows/ci.yml`):
+  `pytest tests/test_repo_format_guard.py -v` を最初に走らせ、
+  既存の per-version test も継続実行 (二重 gate)
+- **P1-4 / P1-5** (`docs/separation/notes.md` 拡張):
+  - 「v1.9 boundary smoke tests の限界」section 追加
+    (top-level import のみ検出 / lazy import 許容 / v1.10/v1.11 で改善)
+  - 「pyvisa CI 戦略」section: v1.9 で uninstall して検出 → v2.0 で
+    base install から外す方針
+- **P1-6** (`docs/instrument_promote_check.md` 新規):
+  - `--target draft/experimental/tested/verified` ルール表
+  - 下方移動が常に eligible である理由
+  - JSON 出力例 / 終了コード / `validate instrument --strict` との
+    使い分け
+  - 内部実装 (strict 結果を再利用) の明記
+- **P1-7** (`docs/separation/notes.md`):
+  registry.py 分割候補 (`registry/index.py` / `instrument_validation.py`
+  / `strict_checks.py` / `plan_validation.py` /
+  `benchmark_validation.py` / `category_policy.py`) を v1.10 向け
+  TODO として明記
+- **P2-8** (`docs/category_policy.md` 新規):
+  - canonical category 表 (output-capable 列付き)
+  - alias 表 (`multimeter` → `dmm` 等)
+  - `normalize_category()` 呼び出し場所一覧
+  - scaffold template の `metadata.category` 一致状況 (v1.8.1 で
+    `dmm` 統一済み)
+  - v1.10+ への TODO (registry INDEX lint alias 検出 / 階層化判断)
+
+### 互換性
+
+- public API / CLI 引数 / 既存 docs / 既存 test すべて不変
+- 新規 docs 2 件 (`instrument_promote_check.md` / `category_policy.md`)
+- 新規 test file 2 件 (`test_repo_format_guard.py` /
+  `test_v191_review.py`)
+- CI workflow に lint step が 1 つ追加されただけ
+- Stable 43 / Experimental 7 / 合計 50 不変
+
+---
+
 ## v1.9.0 — Instrument Quality + Separation Boundary Smoke Tests
 
 合言葉: **「scaffold した instrument を tested / verified へ昇格させら

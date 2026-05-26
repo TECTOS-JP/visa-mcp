@@ -176,13 +176,22 @@ def patch_relative_backend_imports(dst_root: Path) -> int:
             continue
         text = "".join(new_lines)
         # `from typing import ...` 行末に TYPE_CHECKING を追加
-        text = re.sub(
-            r"^(from typing import [^\n]+?)(\n)",
-            lambda m: (m.group(1) + ", TYPE_CHECKING" + m.group(2)
-                       if "TYPE_CHECKING" not in m.group(1)
-                       else m.group(0)),
-            text, count=1, flags=re.MULTILINE,
-        )
+        # (既存 typing import が無い場合は新規 import 行を追加)
+        if re.search(r"^from typing import ", text, re.MULTILINE):
+            text = re.sub(
+                r"^(from typing import [^\n]+?)(\n)",
+                lambda m: (m.group(1) + ", TYPE_CHECKING" + m.group(2)
+                           if "TYPE_CHECKING" not in m.group(1)
+                           else m.group(0)),
+                text, count=1, flags=re.MULTILINE,
+            )
+        else:
+            # `from __future__ import annotations` の直後に追加
+            text = re.sub(
+                r"^(from __future__ import annotations\n)",
+                r"\1from typing import TYPE_CHECKING\n",
+                text, count=1, flags=re.MULTILINE,
+            )
         # TYPE_CHECKING block + VisaError fallback を挿入
         injection = (
             "\n"

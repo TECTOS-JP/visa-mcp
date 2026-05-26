@@ -1,5 +1,135 @@
 # 変更履歴
 
+## v2.0.0 — PyVISA Backend Package + Compatibility Shim (final release)
+
+**visa-mcp** は v2.0 から **lab-executor-mcp 用の PyVISA backend
+package + 旧 import 互換 shim** として正式公開する。v1.x まで 1
+パッケージで提供していた「実験実行 runtime / DSL / extension
+ecosystem」は v2.0 で **`lab-executor-mcp`** (新 repo) に移った。
+
+### Positioning
+
+```
+lab-executor-mcp   ← backend-independent experiment runtime
+visa-mcp           ← PyVISA backend + raw VISA tools + 旧互換 shim
+```
+
+依存方向は固定:
+
+```
+visa-mcp  →  lab-executor-mcp  (許可)
+lab-executor-mcp  →  visa-mcp  (禁止)
+```
+
+### Depends on
+
+- `lab-executor-mcp >= 2.0.2, < 3.0.0`
+- `pyvisa`
+- `pydantic`
+- `pyyaml`
+
+### Kept in visa-mcp
+
+- `PyVisaBackend` (`InstrumentBackend` adapter)
+- `VisaManager` / `SessionManager` / `BusManager`
+- raw VISA tools (env-gated `VISA_MCP_ENABLE_RAW_TOOLS=1`)
+- `tools/discovery.py` (PyVISA resource 列挙 → `list_resources`)
+- `visa-mcp serve` 互換 entry point (composition root)
+- `visa_mcp.*` 旧 import path の **shim** (27 module)
+
+### Moved to lab-executor-mcp
+
+- DSL (`ExperimentPlan`, `dsl_version=0.8`) + validator + dry-run
+- Job manager / state machine / scheduler / barrier
+- Group / Map executor
+- Observation API (`timeline` / `live_view` / `summary`)
+- Benchmark runner + repair tasks
+- Definition pack ecosystem
+  (`extension init/install/check/package/catalog/authoring`)
+- Instrument authoring
+  (`scaffold` / `promote-check` / `review-report`)
+- Registry / response parser
+- Export / bundle
+- Audit / locks / SQLite
+
+### Compatibility
+
+- 旧 `from visa_mcp.* import ...` はすべて **DeprecationWarning** 付き
+  で動作 (`from lab_executor.* import *` に forward)
+- **MCP tool**: Stable 43 + Experimental 7 = **50** (v1.0 から不変)
+- **DSL**: `dsl_version=0.8` 完全互換
+- **extension pack** `.visa-mcp-ext.zip` 形式: 完全互換
+- **`.install_meta.json`** schema: 完全互換
+- **`~/.visa-mcp/extensions/`** install path: 継続使用 (v2.x で
+  `~/.lab-executor/extensions/` への移行検討)
+
+### CLI status
+
+- `visa-mcp --version` / `--help` / `serve` / `list-resources`:
+  従来互換
+- `visa-mcp validate / extension / instrument <subcommand>`:
+  shim 経由で動作 (`DeprecationWarning` 付き、lab-executor 側実装に
+  forward)
+- 実機 MCP server 起動の推奨入口は引き続き **`visa-mcp serve`**
+  (`lab-executor serve` は v2.0 では placeholder、v2.1+ で実装予定)
+
+### Raw VISA tools
+
+接続確認 / デバッグ / 緊急確認用。env-gated を維持:
+
+```bash
+export VISA_MCP_ENABLE_RAW_TOOLS=1
+visa-mcp serve
+```
+
+通常の AI エージェント実験は lab-executor runtime + named command
+/ DSL 経由を推奨。
+
+### Verified
+
+ローカル + クリーン clone (`git clone --branch v2.0.0`):
+
+```
+python -m tomllib pyproject.toml             OK
+python -c "import yaml; yaml.safe_load(ci.yml)"  OK
+python -m compileall src tests                OK
+pytest tests/test_v200_shim.py                22 passed
+python -m build                               OK (wheel)
+import visa_mcp                               2.0.0
+import lab_executor                           >= 2.0.2
+DeprecationWarning on visa_mcp.extension      OK
+from visa_mcp.dsl.compiler import X           OK (submodule alias)
+PyVisaBackend signature satisfies Protocol    OK (inspect.signature)
+PyVisaBackend constructor lazy                OK
+visa-mcp <subcommand> --help                  OK (validate / extension /
+                                                  instrument shim)
+multiline / LF only guard                     OK (11 file)
+```
+
+### What's NOT in v2.0.0
+
+- New backend plugin system
+- Remote registry
+- Signature / trust store
+- Replay backend
+- CLI redesign
+- `lab-executor serve` 実装 (v2.1+ で予定)
+- Curated lab-executor inherited tests (v2.1+ で順次)
+
+### v2.0.1 候補 (peripheral)
+
+- README / migration guide 表現補正
+- shim 対象 module の追加 (希望があれば)
+- `docs/raw_visa.md` 整備
+- CLI help 表現修正
+- wheel metadata / classifier 微修正
+
+### v2.1+ 候補
+
+- `lab-executor serve` 実装 + CLI 完全 port
+- `~/.lab-executor/extensions/` 並走移行計画
+- visa-mcp shim 利用状況を見て Deprecation スケジュール調整
+
 ## v2.0.0-rc2 — rc1 レビュー応答 (`.gitattributes` LF / PyVisaBackend docstring / Protocol signature test / CLI shim smoke)
 
 合言葉: **「lab-executor-mcp 側の rc2/rc3 と同じ peripheral 整備を

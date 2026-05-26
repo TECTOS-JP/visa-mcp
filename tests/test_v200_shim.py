@@ -181,3 +181,108 @@ def test_visa_mcp_cli_version():
     # --help は exit 0 で usage を返す
     assert result.returncode == 0, (
         f"stdout: {result.stdout[:200]}\nstderr: {result.stderr[:200]}")
+
+
+# ============================================================
+# v2.0.0-rc2: Protocol signature 厳密化 (review P1-2)
+# ============================================================
+
+
+def test_pyvisa_backend_signature_matches_protocol():
+    """PyVisaBackend method signature が
+    `lab_executor.backends.base.InstrumentBackend` と互換であること
+    (引数名 / kw-only 構造を `inspect.signature` で確認)"""
+    import inspect
+    from visa_mcp.backends.pyvisa_backend import PyVisaBackend
+    from lab_executor.backends.base import InstrumentBackend
+
+    # Protocol が要求する param は Impl にすべて存在すること
+    # (Impl が更に optional param を追加するのは許容 — PyVisaBackend は
+    # list_resources(self, query="?*::INSTR") のように PyVISA 固有の
+    # 拡張を持つ)
+    for method in ("list_resources", "query", "write"):
+        proto_fn = getattr(InstrumentBackend, method)
+        impl_fn = getattr(PyVisaBackend, method)
+        proto_sig = inspect.signature(proto_fn)
+        impl_sig = inspect.signature(impl_fn)
+        proto_params = set(proto_sig.parameters.keys()) - {"self"}
+        impl_params = set(impl_sig.parameters.keys()) - {"self"}
+        missing = proto_params - impl_params
+        assert not missing, (
+            f"{method}: Impl missing Protocol params: {missing}\n"
+            f"  Protocol: {sorted(proto_params)}\n"
+            f"  Impl:     {sorted(impl_params)}"
+        )
+
+
+def test_pyvisa_backend_constructor_does_not_open_hardware():
+    """PyVisaBackend() の constructor が PyVISA ResourceManager を
+    即開かないこと (visa_manager の lazy 性確認 / rc2 P1-3)"""
+    import sys as _sys
+    # PyVisaBackend 単独 import では visa_manager まで触らない (
+    # TYPE_CHECKING 経由のため)
+    if "visa_mcp.backends.pyvisa_backend" in _sys.modules:
+        del _sys.modules["visa_mcp.backends.pyvisa_backend"]
+    import visa_mcp.backends.pyvisa_backend as pb
+    # この時点では visa_manager 未 load (TYPE_CHECKING の効果)
+    # constructor を呼ぶと VisaManager() が生成される。
+    b = pb.PyVisaBackend()
+    assert b.backend_id == "pyvisa"
+    # VisaManager は遅延生成だが、ResourceManager の open は更に遅延
+    # (実際の query/write/list_resources まで)
+
+
+# ============================================================
+# v2.0.0-rc2: line-ending / multi-line guard (review P0)
+# ============================================================
+
+
+def test_critical_files_are_multiline_and_lf_only():
+    """主要 file が >= 10 行 + CR=0 で commit されている
+    (`.gitattributes` の効果を CI で固定)"""
+    targets = [
+        "pyproject.toml",
+        ".github/workflows/ci.yml",
+        "README.md",
+        "CHANGELOG.md",
+        "docs/v2_migration.md",
+        "src/visa_mcp/__init__.py",
+        "src/visa_mcp/extension.py",
+        "src/visa_mcp/backends/pyvisa_backend.py",
+        "src/visa_mcp/dsl/__init__.py",
+        "tests/test_v200_shim.py",
+        ".gitattributes",
+    ]
+    failures: list[tuple[str, int, int]] = []
+    for rel in targets:
+        p = ROOT / rel
+        if not p.exists():
+            failures.append((rel, -1, -1))
+            continue
+        text = p.read_text(encoding="utf-8")
+        lines = text.count("\n") + 1
+        cr = text.count("\r")
+        min_lines = 5 if rel.endswith("__init__.py") else 10
+        if lines < min_lines or cr > 0:
+            failures.append((rel, lines, cr))
+    assert not failures, (
+        f"line-ending / multiline guard failed (rel, lines, CR): "
+        f"{failures}")
+
+
+# ============================================================
+# v2.0.0-rc2: CLI shim execution smoke (review P1-4)
+# ============================================================
+
+
+def test_visa_mcp_cli_subcommand_help_smoke():
+    """visa-mcp <subcommand> --help が起動する (shim forward 確認)"""
+    for sub in (["--help"], ["validate", "--help"],
+                 ["extension", "--help"], ["instrument", "--help"]):
+        result = subprocess.run(
+            [sys.executable, "-m", "visa_mcp.cli", *sub],
+            text=True, capture_output=True, encoding="utf-8",
+        )
+        assert result.returncode == 0, (
+            f"args={sub}, code={result.returncode}, "
+            f"stderr={result.stderr[:200]}")

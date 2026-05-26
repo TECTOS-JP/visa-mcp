@@ -1,12 +1,18 @@
-"""v1.11: PyVisaBackend adapter
+"""PyVisaBackend for visa-mcp v2.0.
 
-v2.0 で **visa-mcp 側 (PyVISA 依存)** に残る backend 実装。
+PyVISA-backed `InstrumentBackend` implementation. The experiment
+runtime lives in **`lab-executor-mcp`**; this package (`visa-mcp`)
+provides hardware communication through `VisaManager`.
 
-`InstrumentBackend` Protocol を満たす薄い adapter で、既存
-`VisaManager` を包む。lab-executor 側 runtime は `InstrumentBackend`
-にのみ依存し、`VisaManager` を直接 import しない。
+- 実装する Protocol: `lab_executor.backends.base.InstrumentBackend`
+  (5 attribute: `backend_id` / `list_resources` / `query` / `write` /
+  `close`)
+- 内部: `VisaManager` を **遅延 instantiate** (constructor 引数なし
+  でも import 副作用ゼロ)
+- 利用シーン: `visa-mcp serve` の composition root が
+  `PyVisaBackend()` を生成して lab-executor runtime に inject
 
-詳細: `docs/separation/notes.md` / `docs/backend_abstraction.md`
+詳細: `docs/v2_migration.md` / `docs/raw_visa.md`
 """
 from __future__ import annotations
 from typing import TYPE_CHECKING

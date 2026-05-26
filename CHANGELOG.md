@@ -1,5 +1,64 @@
 # 変更履歴
 
+## v2.0.0-rc2 — rc1 レビュー応答 (`.gitattributes` LF / PyVisaBackend docstring / Protocol signature test / CLI shim smoke)
+
+合言葉: **「lab-executor-mcp 側の rc2/rc3 と同じ peripheral 整備を
+visa-mcp 側にも適用」**
+
+rc1 external review (P0/P1) を反映した patch。public API / shim
+forward 動作 / dependency 範囲すべて不変。
+
+### 調査結果 (rc1 P0: raw 改行)
+
+クリーン clone で確認 → git blob は LF 多数行で正常:
+
+| File | git blob LF |
+|------|-----:|
+| `pyproject.toml` | 59 |
+| `.github/workflows/ci.yml` | 51 |
+| `README.md` | 279 |
+| `docs/v2_migration.md` | 129 |
+| `src/visa_mcp/extension.py` (shim) | 27 |
+| `src/visa_mcp/backends/pyvisa_backend.py` | 76 |
+| `src/visa_mcp/dsl/__init__.py` (shim) | 47 |
+| `tests/test_v200_shim.py` | 183 |
+
+原因は Windows checkout (autocrlf=true) 由来の CRLF artifact が
+レビュアーの raw viewer で「1 line」と mis-report される件
+(lab-executor-mcp 側 v2.0.0-rc3 で確認済の現象と同一)。
+
+### 変更点
+
+- **P0** `.gitattributes` 追加 (lab-executor-mcp と同方針):
+  `* text=auto eol=lf` + `*.py` / `*.toml` / `*.yaml` / `*.yml` /
+  `*.json` / `*.md` 等に `eol=lf` 強制。Windows checkout でも LF
+  維持 → raw viewer 仕様に関わらず正しく line 表示
+- **P1-1** (`src/visa_mcp/backends/pyvisa_backend.py`): docstring を
+  v1.11 表記から **visa-mcp v2.0 backend** 文脈へ書き直し
+  (lab-executor-mcp に runtime が分離されている前提)
+- **P1-2** (`tests/test_v200_shim.py` 新規 test):
+  - `test_pyvisa_backend_signature_matches_protocol`: `inspect.
+    signature` で `InstrumentBackend` の必須 param が
+    `PyVisaBackend` に存在することを検証 (Impl が optional 拡張
+    param を持つことは許容)
+  - `test_pyvisa_backend_constructor_does_not_open_hardware`:
+    constructor の lazy 性確認
+  - `test_critical_files_are_multiline_and_lf_only`:
+    `.gitattributes` の効果を CI で固定 (11 file >= 10 lines + CR=0)
+  - `test_visa_mcp_cli_subcommand_help_smoke`: `visa-mcp <sub>
+    --help` (validate / extension / instrument) が exit 0 で起動
+    する CLI shim forward を検証
+
+### tests
+
+- shim + backend test: **22 件 pass** (rc1 比 +4)
+
+### 互換性
+
+- API / shim forward 動作: 不変
+- dependency (`lab-executor-mcp >= 2.0.2, < 3.0.0`): 不変
+- MCP tool / DSL / extension pack: 不変
+
 ## v2.0.0-rc1 — PyVISA backend + compatibility shim for lab-executor-mcp
 
 合言葉: **「visa-mcp は v2.0 から PyVISA backend package。runtime は

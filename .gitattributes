@@ -1,0 +1,26 @@
+# v2.0.0-rc2: force LF line endings for all text files
+# Prevents Windows checkout (autocrlf=true) from converting LF to CRLF,
+# which some raw viewers mis-report as "1 line files".
+# Same policy as lab-executor-mcp.
+
+* text=auto eol=lf
+
+*.py text eol=lf
+*.toml text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+*.cfg text eol=lf
+*.ini text eol=lf
+*.sh text eol=lf
+
+# binary files
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.zip binary
+*.whl binary
+*.pdf binary

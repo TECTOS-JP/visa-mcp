@@ -9,6 +9,7 @@ from fastmcp import FastMCP
 from visa_mcp.instrument_registry import InstrumentRegistry
 from visa_mcp.visa_manager import VisaManager
 from visa_mcp.session_manager import SessionManager
+from visa_mcp.session_store import SessionStore, default_session_store_path
 from visa_mcp.tools import discovery, commands, pdf_extractor, info, recipes
 from visa_mcp.tools import jobs as jobs_tools
 from visa_mcp.tools import waits as waits_tools
@@ -146,7 +147,14 @@ mcp = FastMCP(
 
 visa_mgr = VisaManager()
 registry = InstrumentRegistry(INSTRUMENTS_DIR)
-session_mgr = SessionManager(visa_mgr, registry)
+# v2.3.0: bindings 永続化 (process 再起動耐性)。
+# `$VISA_MCP_SESSION_STORE` で path 上書き可。
+_session_store = SessionStore(default_session_store_path())
+session_mgr = SessionManager(visa_mgr, registry, store=_session_store)
+logger.info(
+    "session store: path=%s, restored=%d",
+    _session_store.path, len(session_mgr.list_sessions()),
+)
 # v2.1.4: 起動時に instrument YAML のロード状況を可視化
 try:
     _defs = registry.list_definitions()

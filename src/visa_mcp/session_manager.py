@@ -2,11 +2,15 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from visa_mcp.instrument_registry import InstrumentRegistry
 from visa_mcp.models.instrument_def import InstrumentDefinition
 from visa_mcp.visa_manager import VisaManager
 from visa_mcp.utils.idn_matcher import parse_idn
+
+if TYPE_CHECKING:
+    from visa_mcp.session_store import SessionStore
 
 logger = logging.getLogger(__name__)
 
@@ -41,10 +45,74 @@ class InstrumentSession:
 
 
 class SessionManager:
-    def __init__(self, visa_mgr: VisaManager, registry: InstrumentRegistry) -> None:
+    def __init__(
+        self,
+        visa_mgr: VisaManager,
+        registry: InstrumentRegistry,
+        *,
+        store: "SessionStore | None" = None,
+    ) -> None:
+        """v2.3.0: `store` を渡すと bindings を JSON ファイルに永続化し、
+        起動時に auto-restore する。`store=None` なら従来の in-memory only。
+        """
         self._visa = visa_mgr
         self._registry = registry
         self._sessions: dict[str, InstrumentSession] = {}
+        self._store = store
+        if store is not None:
+            self._restore_from_store()
+
+    def _restore_from_store(self) -> None:
+        """v2.3.0: SessionStore から bindings を読み込み、registry に対して
+        definition を再 lookup して in-memory session を構築する。
+        definition が見つからない record も skip するが store からは
+        消さない (後で registry が更新されたら再 restore される)。
+        """
+        store = self._store
+        if store is None:
+            return
+        try:
+            records = store.load()
+        except Exception as e:
+            logger.warning("session store からの restore 失敗: %s", e)
+            return
+        restored = 0
+        missing_def = 0
+        for resource, rec in records.items():
+            manufacturer = rec.get("manufacturer", "")
+            model = rec.get("model", "")
+            bind_method = rec.get("bind_method", "manual")
+            defn = self._registry.get_definition(manufacturer, model)
+            if defn is None:
+                missing_def += 1
+                logger.warning(
+                    "restore skip: %s (%s / %s) の definition が "
+                    "registry に無い", resource, manufacturer, model)
+                continue
+            idn_response = rec.get("idn_response", "") or (
+                "<restored from persisted binding>")
+            try:
+                identified_at = datetime.fromisoformat(rec["bound_at"])
+            except Exception:
+                identified_at = datetime.now()
+            session = InstrumentSession(
+                resource_name=resource,
+                idn_response=idn_response,
+                idn_parsed={
+                    "manufacturer": manufacturer,
+                    "model": model,
+                    "serial": rec.get("serial", "") or "",
+                    "firmware": rec.get("firmware", "") or "",
+                },
+                definition=defn,
+                identified_at=identified_at,
+            )
+            self._sessions[resource] = session
+            restored += 1
+        if restored or missing_def:
+            logger.info(
+                "session store restore: %d 件復元, %d 件 definition 不在",
+                restored, missing_def)
 
     def bind_manually(
         self,
@@ -73,6 +141,17 @@ class SessionManager:
         )
         self._sessions[resource_name] = session
         logger.info("手動バインド: %s → %s", resource_name, defn.display_name)
+        # v2.3.0: 永続化
+        if self._store is not None:
+            try:
+                self._store.upsert(
+                    resource_name,
+                    manufacturer=manufacturer,
+                    model=model,
+                    bind_method="manual",
+                )
+            except Exception as e:
+                logger.warning("bind_manually の persist 失敗: %s", e)
         return session
 
     async def identify(self, resource_name: str) -> InstrumentSession:
@@ -101,6 +180,22 @@ class SessionManager:
             resource_name,
             defn.display_name if defn else "未識別",
         )
+        # v2.3.0: 永続化 (definition が解決できた場合のみ)
+        # registry の YAML metadata 表記 (case 統一) を使って persist
+        # する。IDN response の "KIKUSUI" と YAML の "Kikusui" の
+        # case mismatch で restore 時に definition lookup が失敗する
+        # 問題を回避する。
+        if self._store is not None and defn is not None:
+            try:
+                self._store.upsert(
+                    resource_name,
+                    manufacturer=defn.metadata.manufacturer,
+                    model=defn.metadata.model,
+                    bind_method="identify",
+                    idn_response=idn,
+                )
+            except Exception as e:
+                logger.warning("identify の persist 失敗: %s", e)
         return session
 
     def get_session(self, resource_name: str) -> InstrumentSession | None:
@@ -111,6 +206,22 @@ class SessionManager:
 
     def clear_session(self, resource_name: str) -> None:
         self._sessions.pop(resource_name, None)
+        # v2.3.0: store からも削除
+        if self._store is not None:
+            try:
+                self._store.remove(resource_name)
+            except Exception as e:
+                logger.warning("clear_session の persist 失敗: %s", e)
 
     def clear_all(self) -> None:
         self._sessions.clear()
+        if self._store is not None:
+            try:
+                self._store.clear_all()
+            except Exception as e:
+                logger.warning("clear_all の persist 失敗: %s", e)
+
+    # v2.3.0: store accessor (for tests / advanced ops)
+    @property
+    def store(self):
+        return self._store

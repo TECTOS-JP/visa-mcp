@@ -144,9 +144,39 @@ def register_tools(mcp: FastMCP, session_mgr: SessionManager) -> None:
         """
         現在のセッションで識別済みの機器一覧と、
         各機器で利用可能なコマンド名を返す。
+        v2.3.0: bindings は process 再起動を跨いで永続化される。
+        起動時に SessionStore から auto-restore された sessions も含む。
         """
         sessions = session_mgr.list_sessions()
         return {"success": True, "data": {"sessions": sessions, "count": len(sessions)}}
+
+    @mcp.tool()
+    async def clear_persisted_binding(resource_name: str) -> dict:
+        """**(experimental, v2.3.0)** 永続化された binding を削除する。
+
+        process 再起動後も復元されないよう、~/.visa-mcp/sessions.json
+        (または VISA_MCP_SESSION_STORE) からも除去する。同時に
+        in-memory session も clear する。
+
+        Args:
+            resource_name: 削除する VISA resource (例: "GPIB0::2::INSTR")
+
+        Returns:
+            data.removed: bool (削除した場合 True)
+            data.resource_name: 対象 resource
+            data.remaining_sessions: 現在残っている session 数
+        """
+        existed_before = session_mgr.get_session(resource_name) is not None
+        session_mgr.clear_session(resource_name)
+        # clear_session が store 連動するので、ここでは結果だけ返す
+        return {
+            "success": True,
+            "data": {
+                "removed": existed_before,
+                "resource_name": resource_name,
+                "remaining_sessions": len(session_mgr.list_sessions()),
+            },
+        }
 
     @mcp.tool()
     async def list_commands(resource_name: str) -> dict:

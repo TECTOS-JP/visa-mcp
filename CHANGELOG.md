@@ -1,5 +1,78 @@
 # 変更履歴
 
+## v2.3.0 — bindings / identified state の永続化 (process 再起動耐性)
+
+合言葉: **「bind_definition は一度きり」**
+
+### 背景
+
+レビューで P1 として挙がった: 「process 再起動のたびに
+`bind_definition` が必要だと、長時間運用や復旧時に弱い。
+手動 bind した 7563 のような *IDN? 非対応機器では特に重要」。
+
+長時間運用 / クラッシュ復旧 / 複数エージェント運用で、過去に
+identify / bind した結果を都度やり直すコストが顕著になっていた。
+
+### 修正
+
+- **新規 `src/visa_mcp/session_store.py`**:
+  - JSON ファイル (`~/.visa-mcp/sessions.json` または
+    `$VISA_MCP_SESSION_STORE`) に bindings を永続化
+  - atomic write (tmpfile + os.replace)
+  - 不正 JSON / schema mismatch / missing file は warning して
+    空扱い (運用継続性優先)
+- **`SessionManager`**:
+  - `__init__(store=...)` で SessionStore を受け取り、起動時に
+    auto-restore する。`store=None` なら従来通り in-memory only
+    (完全後方互換)
+  - `bind_manually` / `identify` 完了時に store.upsert
+  - `clear_session` / `clear_all` 時に store からも削除
+  - `identify` の persist は registry の YAML 表記
+    (`Kikusui` / `Yokogawa` 等の case 統一) を使う
+    (IDN 応答の `KIKUSUI` で persist して restore 失敗する罠を回避)
+- **server.py**:
+  - 起動時に `SessionStore(default_session_store_path())` を作成
+    して SessionManager に渡す
+  - 起動 log に `session store: path=..., restored=N` を出力
+- **新 MCP tool `clear_persisted_binding(resource_name)`** (experimental):
+  - 指定 resource の binding を in-memory と store の両方から削除
+  - 返り値: `removed`, `resource_name`, `remaining_sessions`
+
+### 復元できない場合の挙動
+
+- definition が registry に無い (YAML 削除や rename) → warning して
+  skip。store の record は残す (後で registry が更新されたら次回
+  起動時に restore できる)
+- store ファイル破損 → 空扱いで継続、log warning
+- write 失敗 → in-memory のみで継続、log warning
+
+### 実機検証
+
+```
+Phase 1: identify(PMX35-3A) + bind_manually(7563, Yokogawa, 7563)
+  store: 2 records (Kikusui PMX35-3A / Yokogawa 7563)
+Phase 2: 新 SessionManager(store=同一 path)
+  restored: 2 sessions, both def_loaded=True
+```
+
+### 互換性
+
+完全後方互換。Stable / Experimental tool API:
+- Stable 不変
+- Experimental に `clear_persisted_binding` 1 件追加
+- `list_identified_instruments` は内容互換 (restored セッションも
+  含めて返す)
+- 既存 server.py 起動コードは外部影響なし
+
+### スコープ外 (次回以降)
+
+- multi-process 排他 (lockfile / SQLite 化)
+- bindings の export/import (bundle 同梱)
+- staleness 検出 (resource が消えた場合の自動 mark)
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+
+
 ## v2.2.1 — Codex v2.2.0 レビュー対応 (resolver dev 判定 + 7563 corruption pattern)
 
 合言葉: **「wheel install 環境で `<venv>\\Lib\\instruments` を見ない」**

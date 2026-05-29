@@ -1,5 +1,42 @@
 # 変更履歴
 
+## v2.2.0 — Yokogawa 7563 parser 強化 + builtin YAML 更新
+
+合言葉: **「parser 未マッチでも値だけは救う」**
+
+### lab-executor-mcp v2.14.0 と同時 release
+
+実機 E2E で同じ 7563 から `NTTC+0033.0E+0` (parser ok) と
+`JPPC+0029*1A+0` (未マッチ) が混在する現象を観測。AI エージェントが
+「温度が読めなかった」と誤判定する問題があった。
+
+### 修正
+
+- `examples/instruments/yokogawa_7563.yaml` の `measurement_data`
+  response_format を:
+  - `patterns: list[str]` で複数代替化
+  - 厳密 pattern: `tc_type` を `[A-Z]` に広げる (T-type 等の取りこぼし
+    解消)
+  - 緩い pattern: `^[A-Z]{4}<value>$` で未確認 prefix でも値を抽出
+  - `fallback: "numeric_extract"` で完全未マッチでも raw から
+    数値だけ救う
+- `src/visa_mcp/builtin_instruments/yokogawa_7563.yaml` を同期
+- 依存: `lab-executor-mcp>=2.14.0,<3.0.0` (parser 拡張側)
+
+### 実機検証
+
+PMX 出力 2.0V / 7563 read_measurement で raw `JPPC+0029*2A+0\t` を
+取得 → parsed.value_numeric=29.0 / fallback_used=numeric_extract が
+results / timeline に乗る。
+
+### 互換性
+
+Stable / Experimental tool API 不変。旧 `pattern: <regex>` を持つ
+カスタム YAML は後方互換。
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+
+
 ## v2.1.5 — Codex レビュー反映 (builtin _system 安全化 + resolver 順序確定 + 実 wheel 検証)
 
 合言葉: **「example を fallback default にしない」**

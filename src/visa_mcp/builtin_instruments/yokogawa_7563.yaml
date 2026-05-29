@@ -98,16 +98,30 @@ safety:
     - name: "Range over indication"
       description: "オーバレンジ時にステータスバイトでフラグが立つ"
 
-# ===== 応答フォーマット (v0.2.0) =====
+# ===== 応答フォーマット (v0.2.0 → v2.14.0) =====
 response_formats:
   measurement_data:
-    pattern: '^(?P<status>[NFOTBC])(?P<func>[NTRKEJSB])(?P<tc_type>[KCFVA])(?P<unit>[CFKVNA])(?P<value>[+-]\d+\.\d+E[+-]\d+)\s*$'
+    # v2.14.0: 複数代替 patterns + numeric_extract fallback。
+    # 7563 が同一 query 内で format を切り替えてくる挙動を実機で
+    # 観測しているため (NTTC / NTKC ↔ 状態別 prefix)、known prefix
+    # を列挙しつつ、unknown 4 文字 prefix にも数値 fallback で対応する。
+    patterns:
+      # 厳密形 (status + func + tc_type + unit + 値)
+      - '^(?P<status>[NFOTBC])(?P<func>[NTRKEJSB])(?P<tc_type>[A-Z])(?P<unit>[CFKVNA])(?P<value>[+-]\d+\.\d+E[+-]\d+)\s*$'
+      # 値だけ抜き出す緩い形 (status/func/tc_type/unit が未知 4 文字
+      # alpha のとき) — JPPC のような未確認 prefix に対応。
+      - '^(?P<prefix>[A-Z]{4})(?P<value>[+-]\d+\.\d+E[+-]\d+)\s*$'
+    # どちらにも当たらない場合: raw から `[+-]\d+(\.\d+)?(E[+-]?\d+)?`
+    # を抽出して value_numeric に入れる。raw は保持。
+    fallback: "numeric_extract"
     description: |
-      Yokogawa 7563 独自の測定データ応答形式。
+      Yokogawa 7563 独自の測定データ応答形式 (v2.14.0 拡張)。
       例: NTKC+00027.2E+0
         N=Normal (status), T=Temperature (func),
         K=K type TC, C=Celsius (unit),
         +00027.2E+0 = 27.2℃
+      JPPC+0029*1A+0 のような未確認 prefix は緩い pattern または
+      numeric_extract fallback で値だけ救う。raw_response は常に保持。
     fields:
       status:
         N: "Normal"

@@ -60,6 +60,8 @@ def test_resolver_prefers_repo_instruments_over_examples(
 
     # `here.parent.parent.parent` が fake_repo に対応するように、
     # __file__ がそこの src/visa_mcp/server.py であるかのように振る舞わせる
+    # v2.1.6+: dev リポジトリ判定に pyproject.toml が必要
+    (fake_repo / "pyproject.toml").write_text("[project]", encoding="utf-8")
     fake_server = fake_repo / "src" / "visa_mcp"
     fake_server.mkdir(parents=True)
     fake_server_py = fake_server / "server.py"
@@ -92,6 +94,8 @@ def test_resolver_skips_instruments_when_only_underscore_yaml(
     (examples_instr / "real_dmm.yaml").write_text(
         "metadata: {}", encoding="utf-8")
 
+    # v2.1.6+: dev リポジトリ判定に pyproject.toml が必要
+    (fake_repo / "pyproject.toml").write_text("[project]", encoding="utf-8")
     fake_server = fake_repo / "src" / "visa_mcp"
     fake_server.mkdir(parents=True)
     fake_server_py = fake_server / "server.py"

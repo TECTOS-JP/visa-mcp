@@ -110,7 +110,10 @@ response_formats:
       - '^(?P<status>[NFOTBC])(?P<func>[NTRKEJSB])(?P<tc_type>[A-Z])(?P<unit>[CFKVNA])(?P<value>[+-]\d+\.\d+E[+-]\d+)\s*$'
       # 値だけ抜き出す緩い形 (status/func/tc_type/unit が未知 4 文字
       # alpha のとき) — JPPC のような未確認 prefix に対応。
-      - '^(?P<prefix>[A-Z]{4})(?P<value>[+-]\d+\.\d+E[+-]\d+)\s*$'
+      # v2.2.1: 値部分の `.` / `E` が `*` / `A` に bit 反転で
+      # 破損するケースがあるため、両方受け付ける。parser 側で
+      # 寛容 float 変換 (`*`→`.`, `A`→`E`) が走る。
+      - '^(?P<prefix>[A-Z]{4})(?P<value>[+-]\d+[.*]\d+[EAea][+-]\d+)\s*\S*\s*$'
     # どちらにも当たらない場合: raw から `[+-]\d+(\.\d+)?(E[+-]?\d+)?`
     # を抽出して value_numeric に入れる。raw は保持。
     fallback: "numeric_extract"

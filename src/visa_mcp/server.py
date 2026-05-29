@@ -56,6 +56,12 @@ def _resolve_instruments_dir() -> Path:
             "VISA_MCP_INSTRUMENTS_DIR=%s は存在しません。fallback 探索に移ります", env)
     here = Path(__file__).resolve()
     repo_root = here.parent.parent.parent
+    # v2.1.6: wheel install 環境で `<venv>\Lib\instruments` を
+    # dev repo の `<repo>/instruments` と誤検出する問題を回避する。
+    # `<repo>/pyproject.toml` がある場合のみ dev リポジトリとみなす。
+    # `<venv>\Lib` には pyproject.toml が無いため builtin に正しく落ちる。
+    is_dev_repo = (repo_root / "pyproject.toml").is_file()
+
     # 「instrument YAML」は `_` 始まりでない (= _system.yaml /
     # _template.yaml 等の system/template ファイルを除く) yaml を
     # 1 件以上含むディレクトリ、と定義する。
@@ -67,16 +73,17 @@ def _resolve_instruments_dir() -> Path:
             for p in d.glob("*.yaml")
         )
 
-    # v2.1.5: 利用者の運用配置 (`<repo>/instruments`) を最優先する。
-    # ここに `_system.yaml` + カスタム instrument YAML を置く運用が
-    # 既に存在する。次に開発リポジトリの `examples/instruments`、
-    # 最後に wheel 同梱 `builtin_instruments` の順。
-    for cand in (
-        repo_root / "instruments",                # 運用配置 (利用者)
-        repo_root / "examples" / "instruments",   # 開発リポジトリ
-    ):
-        if _has_instrument_yaml(cand):
-            return cand
+    if is_dev_repo:
+        # v2.1.5: 利用者の運用配置 (`<repo>/instruments`) を最優先する。
+        # ここに `_system.yaml` + カスタム instrument YAML を置く運用が
+        # 既に存在する。次に開発リポジトリの `examples/instruments`、
+        # 最後に wheel 同梱 `builtin_instruments` の順。
+        for cand in (
+            repo_root / "instruments",                # 運用配置 (利用者)
+            repo_root / "examples" / "instruments",   # 開発リポジトリ
+        ):
+            if _has_instrument_yaml(cand):
+                return cand
     # wheel-installed default
     builtin = here.parent / "builtin_instruments"
     if builtin.is_dir():

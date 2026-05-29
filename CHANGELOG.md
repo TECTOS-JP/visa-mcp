@@ -1,5 +1,44 @@
 # 変更履歴
 
+## v2.2.1 — Codex v2.2.0 レビュー対応 (resolver dev 判定 + 7563 corruption pattern)
+
+合言葉: **「wheel install 環境で `<venv>\\Lib\\instruments` を見ない」**
+
+### Codex v2.2.0 レビュー指摘 (visa-mcp 側)
+
+**P1-a**: wheel install 環境で resolver が `<venv>\Lib\instruments`
+(過去に手動コピーした古い YAML が残ってる場所) を builtin より
+優先してしまい、v2.2.0 の新 parser 定義が適用されていなかった。
+
+**P1-b** (YAML 側): 7563 の loose pattern が `JPPC+0029*0A+0` の
+ような corruption を受け入れず、parser が `JPPC` に当たらない
+ケースが残っていた。
+
+### 修正
+
+- `server.py:_resolve_instruments_dir()`:
+  - dev リポジトリ判定に `<repo>/pyproject.toml` の存在を要求
+  - wheel install 環境 (`<venv>\Lib` には pyproject.toml が無い)
+    では dev path 探索を skip し、builtin に確実に落ちる
+- `examples/instruments/yokogawa_7563.yaml` + builtin copy:
+  - loose pattern の値部を `[+-]\d+[.*]\d+[EAea][+-]\d+` に拡張
+    し、`*`/`A` corruption を受け付ける
+  - lab-executor v2.14.1 の寛容 float 変換と組で正しい値を復元
+- `_extract_result_rows` (visa-mcp 側 export shim) も同じ parsed
+  metadata 除外を適用 (lab-executor 側と同期)
+- 4 件 test 追加 (`test_v2_2_1_review.py`):
+  - resolver が pyproject.toml 無しの dev path を skip
+  - resolver が pyproject.toml ありの dev path を優先
+  - builtin 7563 YAML の loose pattern が JPPC を受け入れる
+  - visa-mcp 側 export shim も parsed metadata を skip
+
+### 互換性
+
+`pyproject.toml` を持つ通常の dev リポジトリは引き続き `<repo>/instruments`
+が優先される。Stable / Experimental tool API は不変。lab-executor v2.14.1
+と組で release。
+
+
 ## v2.2.0 — Yokogawa 7563 parser 強化 + builtin YAML 更新
 
 合言葉: **「parser 未マッチでも値だけは救う」**

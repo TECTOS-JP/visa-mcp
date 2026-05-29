@@ -165,19 +165,61 @@ def _extract_result_rows(
         # parsed measurement (v0.8.x response_parsed dict)
         # v2.1.2: step_executor は `parsed` キーで保存することもあるため
         # 両方を OR で読む。
+        # v2.2.1: response_parser の metadata keys (matched / fields /
+        # raw / fallback_used / matched_pattern_index) は rows 化せず
+        # `fields` の numeric / `value_numeric` だけを rows 化する。
         parsed = (
             r.get("response_parsed")
             or r.get("parsed")
         ) if isinstance(r, dict) else None
+        _PARSED_METADATA_KEYS = {
+            "matched", "matched_pattern_index", "raw",
+            "fallback_used", "fields", "error",
+        }
+        emitted_from_parsed = False
         if isinstance(parsed, dict) and parsed:
-            for k, v in parsed.items():
-                rows.append({
-                    **common,
-                    "measurement": k,
-                    "value": v,
-                    "unit": "",
-                })
-        else:
+            cmd_name = r.get("command") or s.get("step_type")
+            top_numeric_keys = [
+                k for k, v in parsed.items()
+                if k not in _PARSED_METADATA_KEYS
+                and isinstance(v, (int, float))
+            ]
+            new_fields = parsed.get("fields") if isinstance(
+                parsed.get("fields"), dict) else None
+            value_numeric = parsed.get("value_numeric")
+            if new_fields or value_numeric is not None:
+                for k, v in (new_fields or {}).items():
+                    if not isinstance(v, (int, float)):
+                        continue
+                    rows.append({
+                        **common,
+                        "measurement": f"{cmd_name}.{k}" if cmd_name else k,
+                        "value": v,
+                        "unit": "",
+                    })
+                    emitted_from_parsed = True
+                if value_numeric is not None and isinstance(
+                    value_numeric, (int, float)
+                ):
+                    rows.append({
+                        **common,
+                        "measurement": (
+                            f"{cmd_name}.value_numeric"
+                            if cmd_name else "value_numeric"),
+                        "value": value_numeric,
+                        "unit": "",
+                    })
+                    emitted_from_parsed = True
+            elif top_numeric_keys:
+                for k in top_numeric_keys:
+                    rows.append({
+                        **common,
+                        "measurement": k,
+                        "value": parsed[k],
+                        "unit": "",
+                    })
+                    emitted_from_parsed = True
+        if not emitted_from_parsed:
             # 数値 raw response or value
             # v2.1.2 fix: lab-executor v2.13.2 と同じく
             # step_executor が保存する `raw_response` を読む。

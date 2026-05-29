@@ -1,5 +1,37 @@
 # 変更履歴
 
+## v2.1.2 — get_experiment_results rows=0 修正 (visa-mcp serve 側 shim)
+
+合言葉: **「lab-executor を直したら visa-mcp の独自 export も直せ」**
+
+lab-executor-mcp v2.13.2 で `_extract_result_rows` のキー名不一致を
+修正したが、**`visa-mcp serve` が実際に登録するのは
+`visa_mcp.tools.export` 側の独自コピー**であり、こちらは依然
+`response_raw` / `response_parsed` しか読まなかった。結果として
+Codex 実機 E2E (v2.13.2 + v2.1.1) で `get_experiment_results rows=0`
+が再発した (P1 critical)。
+
+### 修正
+
+- `src/visa_mcp/tools/export.py:_extract_result_rows`:
+  - parsed: `response_parsed` / `parsed` を OR で読む
+  - raw: `raw_response` / `response_raw` / `response` を OR で読む
+  - 旧名は後方互換として残置
+- `pyproject.toml`: `lab-executor-mcp>=2.13.2,<3.0.0`
+- `tests/test_v2_1_2_results_integration.py`: 4 件追加
+  - 実 `JobStore` に `raw_response` 付き step を保存し
+    `visa_mcp.tools.export._extract_result_rows` が rows を返すこと
+  - parsed alias / 後方互換 legacy keys / version sentinel
+
+### 互換性
+
+Stable 43 / Experimental 7 / DSL `dsl_version=0.8` 維持。MCP tool 名
+/ 引数 / response 構造は不変。`visa-mcp serve` 起動 + plan 実行で
+`get_experiment_results` が rows を返すようになる。
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+
+
 ## v2.1.1 — Discovery diagnostics: empty-with-success + resource_not_found
 
 合言葉: **「device が消えた状態を agent に伝える」**

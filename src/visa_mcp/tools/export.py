@@ -163,7 +163,12 @@ def _extract_result_rows(
                            if s.get("step_index") is not None else None)),
         }
         # parsed measurement (v0.8.x response_parsed dict)
-        parsed = r.get("response_parsed") if isinstance(r, dict) else None
+        # v2.1.2: step_executor は `parsed` キーで保存することもあるため
+        # 両方を OR で読む。
+        parsed = (
+            r.get("response_parsed")
+            or r.get("parsed")
+        ) if isinstance(r, dict) else None
         if isinstance(parsed, dict) and parsed:
             for k, v in parsed.items():
                 rows.append({
@@ -174,9 +179,16 @@ def _extract_result_rows(
                 })
         else:
             # 数値 raw response or value
+            # v2.1.2 fix: lab-executor v2.13.2 と同じく
+            # step_executor が保存する `raw_response` を読む。
+            # 旧名 `response_raw` / `response` は後方互換のため残す。
             v = r.get("value")
             if v is None:
-                v = r.get("response_raw") or r.get("response")
+                v = (
+                    r.get("raw_response")
+                    or r.get("response_raw")
+                    or r.get("response")
+                )
             if v is not None:
                 rows.append({
                     **common,

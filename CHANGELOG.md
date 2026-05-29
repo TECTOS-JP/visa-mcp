@@ -1,5 +1,38 @@
 # 変更履歴
 
+## v2.1.3 — get_experiment_results response に version sentinel 追加
+
+v2.1.2 反映後の Codex 実機 E2E でも rows=0 が報告されたため
+(コード上は raw_response を読むよう修正済、ローカル MCP tool 経由で
+total=12/rows=12 を確認済) **client が server バージョンを即座に
+判定できる手段**を response に追加。
+
+### 修正
+
+- `tools/export.py:get_experiment_results` の response data に
+  `_meta.versions` を追加 (`visa_mcp` / `lab_executor` / `export_fix`)。
+- `pyproject.toml`: `lab-executor-mcp>=2.13.3,<3.0.0`
+- test: `_meta` / `versions` / `export_fix` が response data に
+  入ることを source check で確認
+
+### 使い方
+
+```python
+result = await session.call_tool("get_experiment_results",
+                                 {"job_id": "..."})
+print(result.data["_meta"]["versions"])
+# {'visa_mcp': '2.1.3', 'lab_executor': '2.13.3', 'export_fix': 'v2.1.3'}
+```
+
+rows=0 を見た瞬間に `_meta.versions.export_fix` が `v2.1.3` 未満
+であれば、起動した server が古いと確定する。
+
+### 互換性
+
+`_meta` は data の追加 field のみ。既存 client は無視できる。
+Stable / Experimental tool API 完全互換。
+
+
 ## v2.1.2 — get_experiment_results rows=0 修正 (visa-mcp serve 側 shim)
 
 合言葉: **「lab-executor を直したら visa-mcp の独自 export も直せ」**

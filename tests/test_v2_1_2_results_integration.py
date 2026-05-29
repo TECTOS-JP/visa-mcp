@@ -89,3 +89,12 @@ def test_v2_1_2_version():
     import visa_mcp
     parts = visa_mcp.__version__.split(".")
     assert tuple(int(p) for p in parts[:3]) >= (2, 1, 2)
+
+
+def test_v2_1_3_version_sentinel_in_response():
+    """v2.1.3: get_experiment_results response data に _meta.versions が
+    入り、Codex 側が rows=0 のとき即座にバージョンを確認できる。"""
+    from visa_mcp.tools import export as _exp
+    src = open(_exp.__file__, encoding="utf-8").read()
+    assert "_meta" in src and "versions" in src
+    assert "export_fix" in src

@@ -424,10 +424,23 @@ class VisaManager:
         except Exception:
             backend = {"available": _PYVISA_AVAILABLE}
 
-        # interface ごとの最終 status を集計 (100 台規模の俯瞰用)
+        # v2.4.1: interface ごとの status 集計 (Codex v2.4.0 レビュー P2)。
+        # 同一 interface に複数 query があるとき、最後の結果で上書きすると
+        # error が ok に隠れる。severity (error > timeout > empty > ok) で
+        # worst を採用し、status 別カウントも併記する。
+        _SEVERITY = {"error": 3, "timeout": 2, "empty": 1, "ok": 0}
         interface_status: dict[str, str] = {}
+        interface_status_detail: dict[str, dict[str, int]] = {}
         for entry in per_query:
-            interface_status[entry["interface"]] = entry["status"]
+            iface = entry["interface"]
+            st = entry["status"]
+            # severity 優先で worst を保持
+            cur = interface_status.get(iface)
+            if cur is None or _SEVERITY.get(st, 0) > _SEVERITY.get(cur, 0):
+                interface_status[iface] = st
+            # 詳細カウント
+            d = interface_status_detail.setdefault(iface, {})
+            d[st] = d.get(st, 0) + 1
 
         return {
             "success": any_success,
@@ -442,8 +455,10 @@ class VisaManager:
                 # v2.4.0 追加 (後方互換、既存 key は不変)
                 "timed_out_interfaces": timed_out,
                 "interface_status": interface_status,
+                # v2.4.1: severity 優先集計 + status 別カウント
+                "interface_status_detail": interface_status_detail,
                 "backend": backend,
-                "diagnostic_schema_version": "2.4",
+                "diagnostic_schema_version": "2.4.1",
             },
             "recommended_next_actions": recommended,
         }

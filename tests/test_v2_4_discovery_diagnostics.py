@@ -108,7 +108,8 @@ async def test_backend_info_in_response():
     backend = res["data"]["backend"]
     assert backend["available"] is True
     assert backend["backend"] == "@ni"
-    assert res["data"]["diagnostic_schema_version"] == "2.4"
+    # v2.4.1 で schema version は "2.4.1" に上がった
+    assert res["data"]["diagnostic_schema_version"].startswith("2.4")
 
 
 @pytest.mark.asyncio
@@ -149,3 +150,60 @@ def test_v2_4_0_version():
     import visa_mcp
     parts = visa_mcp.__version__.split(".")
     assert tuple(int(p) for p in parts[:3]) >= (2, 4, 0)
+
+
+# ==============================================================
+# v2.4.1: interface_status severity 優先集計 (Codex v2.4.0 P2)
+# ==============================================================
+
+
+@pytest.mark.asyncio
+async def test_interface_status_severity_priority_error_over_ok():
+    """同一 interface に error と ok の query があるとき、
+    interface_status は error を優先 (ok で上書きされない)。"""
+    mgr = _FakeVisaManager({
+        "USB_FAIL?*": VisaError("VI_ERROR_SYSTEM_ERROR"),
+        "USB?*": ["USB0::INSTR"],
+    })
+    # 両方 interface="USB" になるよう _interface_of は prefix 判定
+    res = await mgr.discover_resources_safe(["USB_FAIL?*", "USB?*"])
+    # USB_FAIL?* / USB?* どちらも interface=USB
+    assert res["data"]["interface_status"]["USB"] == "error", (
+        f"v2.4.1: error が ok で上書きされている: "
+        f"{res['data']['interface_status']}")
+
+
+@pytest.mark.asyncio
+async def test_interface_status_detail_counts():
+    """interface_status_detail に status 別カウントが入る。"""
+    mgr = _FakeVisaManager({
+        "USB_FAIL?*": VisaError("err"),
+        "USB?*": ["USB0::INSTR"],
+    })
+    res = await mgr.discover_resources_safe(["USB_FAIL?*", "USB?*"])
+    detail = res["data"]["interface_status_detail"]["USB"]
+    assert detail.get("error") == 1
+    assert detail.get("ok") == 1
+
+
+@pytest.mark.asyncio
+async def test_interface_status_severity_timeout_over_empty():
+    mgr = _FakeVisaManager({
+        "GPIB_A?*": VisaTimeoutError("timeout"),
+        "GPIB?*": [],   # empty
+    })
+    res = await mgr.discover_resources_safe(["GPIB_A?*", "GPIB?*"])
+    assert res["data"]["interface_status"]["GPIB"] == "timeout"
+
+
+@pytest.mark.asyncio
+async def test_diagnostic_schema_version_2_4_1():
+    mgr = _FakeVisaManager({"USB?*": ["USB0::INSTR"]})
+    res = await mgr.discover_resources_safe(["USB?*"])
+    assert res["data"]["diagnostic_schema_version"] == "2.4.1"
+
+
+def test_v2_4_1_version():
+    import visa_mcp
+    parts = visa_mcp.__version__.split(".")
+    assert tuple(int(p) for p in parts[:3]) >= (2, 4, 1)

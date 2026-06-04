@@ -1,5 +1,41 @@
 # 変更履歴
 
+## v2.4.1 — interface_status を severity 優先集計に (Codex v2.4.0 レビュー P2)
+
+合言葉: **「error を ok で上書きしない」**
+
+### Codex v2.4.0 レビュー P2
+
+`interface_status[iface] = status` で最後の query 結果に上書きして
+いたため、同一 interface に複数 query があると重大な status が
+隠れていた。例: `USB_FAIL?*` (error) の後に `USB?*` (ok) があると
+`successful_interfaces=["USB"]` / `failed_interfaces=["USB"]` の
+両方に入っていても `interface_status={"USB": "ok"}` になっていた。
+
+### 修正
+
+- `interface_status`: severity 優先 (`error > timeout > empty > ok`) で
+  worst status を採用。複数 query で重大エラーが ok に隠れない。
+- `interface_status_detail`: `{iface: {status: count}}` を新設。
+  例 `{"USB": {"ok": 1, "error": 1}}`。100 台規模で「USB の何件が
+  どの status か」を俯瞰できる。
+- `diagnostic_schema_version`: `"2.4"` → `"2.4.1"`
+
+### テスト
+
+5 件追加:
+- error が ok で上書きされない (severity 優先)
+- timeout が empty で上書きされない
+- `interface_status_detail` の status 別カウント
+- schema version `2.4.1`
+
+### 互換性
+
+`interface_status` の key 構造は不変 (`{iface: status}`)。値が
+「最後」から「worst」に変わる挙動変更のみ。`interface_status_detail`
+は追加 field。既存 key すべて維持。
+
+
 ## v2.4.0 — discovery per-resource/per-interface diagnostic schema
 
 合言葉: **「1 台の GPIB エラーで全体像を見失わない」**

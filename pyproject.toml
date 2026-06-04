@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "visa-mcp"
-version = "2.3.5"
+version = "2.3.6"
 description = "PyVISA backend + compatibility shim for lab-executor-mcp. Hardware (GPIB / USB / Serial / LAN) communication layer."
 readme = "README.md"
 license = { text = "MIT" }
@@ -36,6 +36,10 @@ dev = [
     "pytest>=7.0",
     "pytest-asyncio>=0.21",
     "pytest-mock>=3.0",
+    # v2.3.6: wheel build 回帰テスト (test_wheel_build_succeeds_no_duplicate)
+    # を CI で確実に走らせるため。未導入だと skip され P0 を見逃す
+    # (Codex v2.3.5 レビュー P2)。
+    "build>=1.0",
 ]
 
 [project.urls]

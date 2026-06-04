@@ -1,5 +1,45 @@
 # 変更履歴
 
+## v2.3.6 — Codex v2.3.5 レビュー対応 (resolver test 副作用除去 + build を dev dep に)
+
+合言葉: **「resolver test に server import は要らない (再掲)」**
+
+### Codex v2.3.5 レビュー 2 件
+
+| # | 指摘 | 対応 |
+|---|------|------|
+| **P1** | packaging resolver test が `from visa_mcp import server` で server module を import し、`JobManager(...)` 初期化まで走る。`VISA_MCP_STATE_DB` 未設定の restricted 環境で `~/.visa-mcp/state.sqlite` を開こうとして `sqlite3.OperationalError` で 3 件失敗 | resolver test を `from visa_mcp.instruments_dir import resolve_instruments_dir` の純粋関数直呼びに統一。`srv_mod.__file__` monkeypatch も廃止し `server_file` 引数で渡す。server module を一切 import しない |
+| **P2** | `test_wheel_build_succeeds_no_duplicate` は `build` 未導入だと skip され、CI で P0 を見逃す | `build>=1.0` を `[project.optional-dependencies] dev` に追加 |
+
+### 修正詳細
+
+- `tests/test_v2_1_4_packaging.py`:
+  - `test_resolve_instruments_dir_env_override` → `resolve_instruments_dir`
+    直呼び (env override なので server_file は任意 path)
+  - `test_resolve_instruments_dir_falls_back_to_builtin` → 実 server.py
+    path を渡して純粋関数を呼ぶ
+- `tests/test_v2_1_5_packaging.py`:
+  - resolver 3 test (`prefers_repo_instruments` /
+    `skips_instruments_when_only_underscore` /
+    `falls_back_to_builtin_and_loads_real_definitions`) を
+    純粋関数直呼びに変更
+- `pyproject.toml`: dev deps に `build>=1.0`
+
+### 検証
+
+- `HOME=/nonexistent python -m pytest tests/test_v2_1_4_packaging.py
+  tests/test_v2_1_5_packaging.py` → 12 passed (server/SQLite に
+  一切触れない)
+- `grep "from visa_mcp import server" tests/test_v2_1_*_packaging.py`
+  → 0 件 (副作用 import 撲滅)
+- v2.3.x 全 suite: 42 passed
+
+### 互換性
+
+テスト / packaging metadata のみの変更。ランタイムコード・API は
+v2.3.5 と同一。`pip install git+...@v2.3.6` は v2.3.5 同様に成功。
+
+
 ## v2.3.5 — packaging P0 修正 (wheel build duplicate file)
 
 合言葉: **「packages と force-include で同じファイルを二度入れない」**

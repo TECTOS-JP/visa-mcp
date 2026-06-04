@@ -67,10 +67,11 @@ def test_resolver_prefers_repo_instruments_over_examples(
     fake_server_py = fake_server / "server.py"
     fake_server_py.write_text("# fake", encoding="utf-8")
 
-    from visa_mcp import server as srv_mod
-    monkeypatch.setattr(srv_mod, "__file__", str(fake_server_py))
+    # v2.3.6: server module を import せず純粋関数を直接呼ぶ
+    # (server import は JobManager/JobStore 初期化の副作用がある)
+    from visa_mcp.instruments_dir import resolve_instruments_dir
     monkeypatch.delenv("VISA_MCP_INSTRUMENTS_DIR", raising=False)
-    resolved = srv_mod._resolve_instruments_dir()
+    resolved = resolve_instruments_dir(str(fake_server_py))
     assert resolved == instr, (
         f"v2.1.5: `<repo>/instruments` が優先されるべき。"
         f"resolved={resolved}, expected={instr}")
@@ -101,10 +102,9 @@ def test_resolver_skips_instruments_when_only_underscore_yaml(
     fake_server_py = fake_server / "server.py"
     fake_server_py.write_text("# fake", encoding="utf-8")
 
-    from visa_mcp import server as srv_mod
-    monkeypatch.setattr(srv_mod, "__file__", str(fake_server_py))
+    from visa_mcp.instruments_dir import resolve_instruments_dir
     monkeypatch.delenv("VISA_MCP_INSTRUMENTS_DIR", raising=False)
-    resolved = srv_mod._resolve_instruments_dir()
+    resolved = resolve_instruments_dir(str(fake_server_py))
     assert resolved == examples_instr
 
 
@@ -125,10 +125,9 @@ def test_resolver_falls_back_to_builtin_and_loads_real_definitions(
     fake_server_py.write_text("# fake", encoding="utf-8")
     # fake_repo 下に instruments も examples も置かない
 
-    from visa_mcp import server as srv_mod
-    monkeypatch.setattr(srv_mod, "__file__", str(fake_server_py))
+    from visa_mcp.instruments_dir import resolve_instruments_dir
     monkeypatch.delenv("VISA_MCP_INSTRUMENTS_DIR", raising=False)
-    resolved = srv_mod._resolve_instruments_dir()
+    resolved = resolve_instruments_dir(str(fake_server_py))
     # fake_server の builtin_instruments は存在しないので、実 builtin
     # が見えないケースになる。代わりに直接 builtin_instruments を
     # InstrumentRegistry に与え、definitions が読めることを確認する。

@@ -31,14 +31,18 @@ def test_builtin_instruments_dir_exists():
 
 
 def test_resolve_instruments_dir_env_override(monkeypatch, tmp_path):
-    """`VISA_MCP_INSTRUMENTS_DIR` を設定するとそちらが優先される。"""
+    """`VISA_MCP_INSTRUMENTS_DIR` を設定するとそちらが優先される。
+
+    v2.3.6: server module を import せず純粋関数を直接呼ぶ
+    (server import は JobManager/JobStore 初期化の副作用がある)。
+    """
     yaml_dir = tmp_path / "custom"
     yaml_dir.mkdir()
     (yaml_dir / "dummy.yaml").write_text("hello", encoding="utf-8")
     monkeypatch.setenv("VISA_MCP_INSTRUMENTS_DIR", str(yaml_dir))
-    # server.py の resolver を直接呼ぶ
-    from visa_mcp import server as srv_mod
-    resolved = srv_mod._resolve_instruments_dir()
+    from visa_mcp.instruments_dir import resolve_instruments_dir
+    # env override が効くので server_file は任意の path で良い
+    resolved = resolve_instruments_dir(str(tmp_path / "fake_server.py"))
     assert resolved == yaml_dir
 
 
@@ -46,10 +50,11 @@ def test_resolve_instruments_dir_falls_back_to_builtin(monkeypatch):
     """env 未設定 / repo dev path 不在のとき同梱 builtin_instruments が
     fallback として返ること。"""
     monkeypatch.delenv("VISA_MCP_INSTRUMENTS_DIR", raising=False)
-    from visa_mcp import server as srv_mod
-    resolved = srv_mod._resolve_instruments_dir()
-    # 必ず Path が返り (空でも) 中身に builtin か dev path が
-    # 存在する
+    import visa_mcp
+    from visa_mcp.instruments_dir import resolve_instruments_dir
+    # 実 server.py path を渡す (本物の dev/wheel layout で resolver を動かす)
+    real_server = Path(visa_mcp.__file__).parent / "server.py"
+    resolved = resolve_instruments_dir(str(real_server))
     assert resolved is not None
     assert isinstance(resolved, Path)
 

@@ -1,5 +1,60 @@
 # 変更履歴
 
+## v2.5.0 — probe_all_safe: per-resource health check (100 台規模)
+
+合言葉: **「全台が生きているか、出力に触れず一括確認」**
+
+### 背景
+
+v2.4 で interface 単位の diagnostic schema を整えたが、レビューの
+「100 台規模で instrument 別 / sweep 別に status / latest value /
+last error を見たい」のうち **resource 単位の health check** を
+v2.5 で追加する。
+
+### 新 MCP tool `probe_all_safe` (experimental)
+
+複数 resource を個別に `probe_resource` (open/close のみ、`*IDN?` /
+query / write は一切送らない) で診断し、resource 単位の結果を返す。
+1 台のエラーが他の結果を捨てさせない (部分成功)。
+
+```python
+probe_all_safe(resource_names=[...], timeout_ms=3000, concurrency=8)
+```
+
+Returns:
+- `data.results[]`: `{resource_name, status, elapsed_ms,
+  interface_type, resource_class, error}`
+  - `status` enum: `"ok"` | `"not_found"` | `"timeout"` | `"error"`
+- `data.status_counts`: status 別カウント
+- `data.all_ok`: 全 resource が ok か
+- `partial_success`: 一部成功 + 一部失敗
+- `recommended_next_actions`: not_found / timeout / error 別の案内
+
+### 設計
+
+- `asyncio.Semaphore(concurrency)` で同時 probe 数を制限
+  (GPIB バス保護のため default 8、`concurrency=1` で逐次)
+- `VisaManager.probe_all_safe()` + `_classify_probe_status()` を新設
+- probe_resource が想定外に raise しても `probe_internal_error` として
+  捕捉 (1 台の異常で全体が落ちない)
+
+### 実機検証
+
+```
+probe_all_safe([USB PMX, GPIB 7563], concurrency=2)
+  all_ok=True, status_counts={ok: 2}
+  USB:  status=ok elapsed_ms=29.4 iface=7
+  GPIB: status=ok elapsed_ms=64.4 iface=1
+  (open/close のみ。出力・*IDN? には一切触れない)
+```
+
+### 互換性
+
+新 MCP tool 追加のみ (experimental)。既存 tool は不変。
+tool count 53 → 54。lab-executor の Stable 43 / Experimental 7
+frozen matrix には影響しない (visa-mcp side tool)。
+
+
 ## v2.4.1 — interface_status を severity 優先集計に (Codex v2.4.0 レビュー P2)
 
 合言葉: **「error を ok で上書きしない」**

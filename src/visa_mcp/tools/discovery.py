@@ -103,6 +103,43 @@ def register_tools(mcp: FastMCP, session_mgr: SessionManager) -> None:
         )
 
     @mcp.tool()
+    async def probe_all_safe(
+        resource_names: list[str],
+        timeout_ms: int = 3000,
+        concurrency: int = 8,
+    ) -> dict:
+        """**(experimental, v2.5.0)** 複数 resource を個別 probe して
+        resource 単位の health check 結果を返す (100 台規模の一括診断)。
+
+        各 resource は `probe_resource` (open/close のみ、`*IDN?` や
+        query/write は送らない安全 probe) で診断する。1 台のエラーが
+        他の結果を捨てさせない。
+
+        典型用途:
+        - discover_resources_safe で列挙した resource を一括 health check
+        - 長時間実験の前後で「全 resource が生きているか」を確認
+
+        Args:
+            resource_names: probe する VISA resource のリスト
+            timeout_ms: 各 probe の timeout (default 3000)
+            concurrency: 同時 probe 数 (default 8、GPIB バス保護のため
+                控えめに。1 にすると逐次)
+
+        Returns:
+            data.results: [{resource_name, status, elapsed_ms,
+                interface_type, resource_class, error}]
+                status enum: "ok" | "not_found" | "timeout" | "error"
+            data.status_counts: status 別カウント
+            data.all_ok: 全 resource が ok か
+            partial_success: 一部成功 + 一部失敗
+        """
+        return await session_mgr._visa.probe_all_safe(
+            resource_names,
+            timeout_ms=timeout_ms,
+            concurrency=concurrency,
+        )
+
+    @mcp.tool()
     async def identify_all_instruments(
         query: str = "?*::INSTR",
     ) -> dict:

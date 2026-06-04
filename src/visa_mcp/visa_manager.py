@@ -293,6 +293,138 @@ class VisaManager:
             result["error"] = err
         return result
 
+    @staticmethod
+    def _classify_probe_status(probe_result: dict) -> str:
+        """v2.5.0: probe_resource の結果を status enum に分類する。
+        "ok" | "not_found" | "timeout" | "error"
+        """
+        if probe_result.get("success"):
+            return "ok"
+        err = probe_result.get("error") or {}
+        ec = err.get("error_class", "")
+        code = err.get("code")
+        msg_upper = str(err.get("message", "")).upper()
+        if ec == "visa_resource_not_found":
+            return "not_found"
+        if (
+            "VI_ERROR_TMO" in msg_upper
+            or "TIMEOUT" in msg_upper
+            or (code is not None and int(code) == -1073807339)
+        ):
+            return "timeout"
+        return "error"
+
+    async def probe_all_safe(
+        self,
+        resource_names: list[str],
+        *,
+        timeout_ms: int = 3000,
+        concurrency: int = 8,
+    ) -> dict:
+        """v2.5.0: 複数 resource を個別に probe して resource 単位の
+        health check 結果を返す (100 台規模の一括診断)。
+
+        各 resource は `probe_resource` (open/close のみ、`*IDN?` や
+        query/write は送らない) で診断し、status enum
+        ("ok"/"not_found"/"timeout"/"error") + elapsed_ms を返す。
+        1 台のエラーが他の結果を捨てさせない (部分成功)。
+
+        Args:
+            resource_names: probe する VISA resource のリスト
+            timeout_ms: 各 probe の timeout
+            concurrency: 同時 probe 数 (GPIB バス保護のため控えめに)
+
+        Returns:
+            data.results: [{resource_name, status, elapsed_ms,
+                            interface_type, resource_class, error}, ...]
+            data.status_counts: {ok:N, error:N, timeout:N, not_found:N}
+            data.all_ok: bool
+            partial_success: 一部 ok + 一部 失敗
+        """
+        import time as _time
+
+        if not resource_names:
+            return {
+                "success": True,
+                "partial_success": False,
+                "data": {
+                    "results": [],
+                    "status_counts": {},
+                    "all_ok": True,
+                    "total": 0,
+                },
+            }
+
+        sem = asyncio.Semaphore(max(1, int(concurrency)))
+
+        async def _one(resource: str) -> dict:
+            async with sem:
+                t0 = _time.monotonic()
+                try:
+                    pr = await self.probe_resource(
+                        resource, timeout_ms=timeout_ms)
+                except Exception as e:
+                    # probe_resource は raise しない設計だが念のため
+                    pr = {
+                        "success": False,
+                        "error": {
+                            "error_class": "probe_internal_error",
+                            "type": type(e).__name__,
+                            "message": str(e),
+                        },
+                    }
+                elapsed = round((_time.monotonic() - t0) * 1000.0, 1)
+                status = self._classify_probe_status(pr)
+                data = pr.get("data") or {}
+                return {
+                    "resource_name": resource,
+                    "status": status,
+                    "elapsed_ms": elapsed,
+                    "interface_type": data.get("interface_type"),
+                    "resource_class": data.get("resource_class"),
+                    "error": pr.get("error"),
+                }
+
+        results = await asyncio.gather(
+            *[_one(r) for r in resource_names])
+
+        status_counts: dict[str, int] = {}
+        for r in results:
+            s = r["status"]
+            status_counts[s] = status_counts.get(s, 0) + 1
+        ok_count = status_counts.get("ok", 0)
+        all_ok = ok_count == len(results)
+        any_ok = ok_count > 0
+        any_fail = ok_count < len(results)
+
+        recommended: list[str] = []
+        if status_counts.get("not_found"):
+            recommended.append(
+                "Some resources were not found (device disconnected or "
+                "renamed). Re-run discover_resources_safe to re-enumerate.")
+        if status_counts.get("timeout"):
+            recommended.append(
+                "Some resources timed out. The controller may be busy or "
+                "a device is holding the bus; retry or power-cycle.")
+        if status_counts.get("error"):
+            recommended.append(
+                "Some resources returned VISA errors. Check NI MAX and "
+                "cabling for the failing resources.")
+
+        return {
+            "success": any_ok,
+            "partial_success": any_ok and any_fail,
+            "data": {
+                "results": results,
+                "status_counts": status_counts,
+                "all_ok": all_ok,
+                "total": len(results),
+                "concurrency": int(concurrency),
+                "diagnostic_schema_version": "2.5",
+            },
+            "recommended_next_actions": recommended,
+        }
+
     async def discover_resources_safe(
         self,
         queries: list[str] | None = None,

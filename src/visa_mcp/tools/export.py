@@ -46,7 +46,17 @@ RESULT_COLUMNS = (
     "unit",
     "step_index",
     "step_path",
+    "sweep_index",
+    "sweep_value",
 )
+
+
+def _resolve_export_dir() -> Path:
+    """export 先ディレクトリを優先順で決定する。"""
+    raw = os.environ.get("VISA_MCP_EXPORT_DIR", "").strip()
+    if raw:
+        return Path(raw).expanduser()
+    return DEFAULT_EXPORT_DIR
 
 
 def _safe_export_path(
@@ -60,8 +70,23 @@ def _safe_export_path(
         path: 安全な絶対パス (失敗時 None)
         error_dict: 失敗理由 (成功時 None)
     """
-    base = DEFAULT_EXPORT_DIR.resolve()
-    base.mkdir(parents=True, exist_ok=True)
+    base = _resolve_export_dir().resolve()
+    try:
+        base.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        return (None, {
+            "error_class": "export_dir_not_writable",
+            "message": (
+                f"export ディレクトリを作成できません: {base} ({e}). "
+                "VISA_MCP_EXPORT_DIR で書き込み可能な場所を指定してください。"
+            ),
+            "recoverable": True,
+            "details": {"export_dir": str(base)},
+            "recommended_next_actions": [
+                {"action": "set_export_dir_env",
+                 "reason": "VISA_MCP_EXPORT_DIR=<書き込み可能 path> を設定"},
+            ],
+        })
 
     if output_path is None or not output_path.strip():
         # v0.9.1: default パスでも existence チェックを通す
@@ -161,6 +186,8 @@ def _extract_result_rows(
             "step_path": (r.get("step_path") or
                           (f"steps[{s.get('step_index')}]"
                            if s.get("step_index") is not None else None)),
+            "sweep_index": r.get("sweep_index"),
+            "sweep_value": r.get("sweep_value"),
         }
         # parsed measurement (v0.8.x response_parsed dict)
         # v2.1.2: step_executor は `parsed` キーで保存することもあるため
@@ -264,6 +291,8 @@ def _extract_result_rows(
                     "unit": "",
                     "step_index": None,
                     "step_path": None,
+                    "sweep_index": None,
+                    "sweep_value": None,
                 })
 
     # monitor_data (オプション、monitor_id == job_id 前提の慣用に従う)
@@ -287,9 +316,33 @@ def _extract_result_rows(
                 "unit": m.get("unit", ""),
                 "step_index": None,
                 "step_path": None,
+                "sweep_index": None,
+                "sweep_value": None,
             })
 
     return rows
+
+
+def _filter_rows(
+    rows: list[dict],
+    *,
+    instrument: str | None = None,
+    sweep_index: int | None = None,
+    measurement: str | None = None,
+) -> list[dict]:
+    """結果 row を instrument / sweep_index / measurement で AND フィルタ。
+
+    空文字 / None のフィルタはそのフィールドで絞らない。
+    sweep_index=0 は有効な絞り込みとして扱う。
+    """
+    out = rows
+    if instrument:
+        out = [r for r in out if r.get("instrument") == instrument]
+    if sweep_index is not None:
+        out = [r for r in out if r.get("sweep_index") == sweep_index]
+    if measurement:
+        out = [r for r in out if r.get("measurement") == measurement]
+    return out
 
 
 def register_tools(mcp: FastMCP, job_mgr: JobManager) -> None:
@@ -300,6 +353,9 @@ def register_tools(mcp: FastMCP, job_mgr: JobManager) -> None:
         limit: int = 1000,
         offset: int = 0,
         include_monitor_data: bool = False,
+        instrument: str = "",
+        sweep_index: int | None = None,
+        measurement: str = "",
     ) -> dict:
         """**(experimental, v0.9.1)** Job の測定結果を少量確認用 JSON で取得
 
@@ -337,6 +393,12 @@ def register_tools(mcp: FastMCP, job_mgr: JobManager) -> None:
             all_rows = _extract_result_rows(
                 job_mgr, job_id, include_monitor=include_monitor_data,
             )
+            all_rows = _filter_rows(
+                all_rows,
+                instrument=instrument or None,
+                sweep_index=sweep_index,
+                measurement=measurement or None,
+            )
         except Exception as e:
             return make_envelope(
                 "error",
@@ -358,11 +420,11 @@ def register_tools(mcp: FastMCP, job_mgr: JobManager) -> None:
             _versions = {
                 "visa_mcp": getattr(_vm, "__version__", "?"),
                 "lab_executor": getattr(_le, "__version__", "?"),
-                "export_fix": "v2.1.3",
+                "export_fix": "v2.6.0",
             }
         except Exception:
             _versions = {"visa_mcp": "?", "lab_executor": "?",
-                         "export_fix": "v2.1.3"}
+                         "export_fix": "v2.6.0"}
 
         data: dict = {
             "job_id": job_id,
@@ -374,6 +436,11 @@ def register_tools(mcp: FastMCP, job_mgr: JobManager) -> None:
                 "has_more": has_more,
             },
             "include_monitor_data": include_monitor_data,
+            "filters": {
+                "instrument": instrument or None,
+                "sweep_index": sweep_index,
+                "measurement": measurement or None,
+            },
             "_meta": {"versions": _versions},
         }
         if clamp_warning:
@@ -387,6 +454,9 @@ def register_tools(mcp: FastMCP, job_mgr: JobManager) -> None:
         include_monitor_data: bool = False,
         output_path: str = "",
         overwrite: bool = False,
+        instrument: str = "",
+        sweep_index: int | None = None,
+        measurement: str = "",
     ) -> dict:
         """**(experimental, v0.9.1)** Job の測定結果を CSV / JSONL ファイル出力
 
@@ -452,6 +522,12 @@ def register_tools(mcp: FastMCP, job_mgr: JobManager) -> None:
             rows = _extract_result_rows(
                 job_mgr, job_id, include_monitor=include_monitor_data,
             )
+            rows = _filter_rows(
+                rows,
+                instrument=instrument or None,
+                sweep_index=sweep_index,
+                measurement=measurement or None,
+            )
         except Exception as e:
             return make_envelope(
                 "error",
@@ -495,6 +571,11 @@ def register_tools(mcp: FastMCP, job_mgr: JobManager) -> None:
                 "sha256": sha,
                 "include_monitor_data": include_monitor_data,
                 "columns": list(RESULT_COLUMNS),
+                "filters": {
+                    "instrument": instrument or None,
+                    "sweep_index": sweep_index,
+                    "measurement": measurement or None,
+                },
             },
             job_id=job_id,
         )

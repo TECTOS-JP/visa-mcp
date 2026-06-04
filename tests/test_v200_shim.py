@@ -23,7 +23,9 @@ ROOT = Path(__file__).parent.parent
 
 def test_version_is_2_0_x():
     import visa_mcp
-    assert visa_mcp.__version__.startswith("2.0.")
+    # v2.x shim 系列 (v2.0 で導入、以降 minor を重ねる)。
+    # 旧 "2.0." 固定は v2.1.0 以降ずっと stale だったため "2." に緩和。
+    assert visa_mcp.__version__.startswith("2.")
 
 
 def test_lab_executor_mcp_is_installed():

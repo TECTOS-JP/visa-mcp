@@ -1,5 +1,39 @@
 # 変更履歴
 
+## v2.6.0 — export shim sync with lab-executor v2.18/v2.19
+
+合言葉: **「visa-mcp 経由でも export の列と絞り込みを揃える」**
+
+### 背景
+
+visa-mcp server は `visa_mcp.tools.export` の独自 shim を登録するため、
+lab-executor 側の export 修正を同期しないと、runtime では同じ
+JobManager を使っていても MCP 経由の結果表が古い形になる。
+
+### 同期
+
+- `RESULT_COLUMNS` の末尾に `sweep_index` / `sweep_value` を追加。
+- export 先ディレクトリを `VISA_MCP_EXPORT_DIR` で上書き可能にした。
+  - env 未指定時は `DEFAULT_EXPORT_DIR` 定数を返し、既存 monkeypatch
+    テストとの互換性を維持。
+  - export dir 作成失敗時は `export_dir_not_writable` の structured
+    error を返す。
+- `_extract_result_rows` が `instrument` に加えて `sweep_index` /
+  `sweep_value` を row に載せるようにした。
+- `get_experiment_results` / `export_experiment_results` に optional
+  filter 引数を追加。
+  - `instrument`
+  - `sweep_index`
+  - `measurement`
+  - 複数 filter は AND 結合。
+
+### visa-mcp 固有
+
+- `_meta.versions` は `visa_mcp` / `lab_executor` の両方を返す構造を維持。
+- `export_fix` sentinel を `v2.6.0` に更新。
+- `export_experiment_bundle` manifest の `visa_mcp_version` キーは維持。
+- version を `2.6.0` に更新。
+
 ## v2.5.0 — probe_all_safe: per-resource health check (100 台規模)
 
 合言葉: **「全台が生きているか、出力に触れず一括確認」**

@@ -70,6 +70,38 @@ class VisaManager:
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, partial(func, *args, **kwargs))
 
+    def backend_info(self) -> dict:
+        """v2.4.0: 現在の VISA backend 情報を返す (診断用)。
+
+        - `pyvisa_version`: pyvisa のバージョン
+        - `backend`: ResourceManager の backend 識別子 (例: "@ni", "@py")
+          取得できない場合は None
+        - `available`: pyvisa が import できているか
+        """
+        info: dict = {
+            "available": _PYVISA_AVAILABLE,
+            "pyvisa_version": None,
+            "backend": None,
+        }
+        if not _PYVISA_AVAILABLE:
+            return info
+        try:
+            info["pyvisa_version"] = getattr(pyvisa, "__version__", None)
+        except Exception:
+            pass
+        try:
+            rm = self._get_rm()
+            # pyvisa ResourceManager.visalib.library_path / spec で backend を推定
+            visalib = getattr(rm, "visalib", None)
+            if visalib is not None:
+                # @ni / @py 等の識別子
+                spec = getattr(visalib, "spec", None) or getattr(
+                    visalib, "library_path", None)
+                info["backend"] = str(spec) if spec else None
+        except Exception as e:
+            logger.debug("backend_info の backend 取得失敗: %s", e)
+        return info
+
     async def list_resources(self, query: str = "?*::INSTR") -> list[str]:
         def _list():
             rm = self._get_rm()
@@ -280,21 +312,30 @@ class VisaManager:
                     return prefix
             return q_upper
 
+        import time as _time
+
         per_query: list[dict] = []
         all_resources: list[dict] = []
         successful: list[str] = []
         failed: list[str] = []
+        timed_out: list[str] = []
 
         for q in queries:
             iface = _interface_of(q)
+            # v2.4.0: per-query diagnostic schema。
+            # status enum: "ok" | "empty" | "timeout" | "error"
+            # 旧 `success`/`resources`/`error` も残す (後方互換)。
+            t0 = _time.monotonic()
             entry: dict = {
                 "query": q, "interface": iface,
                 "success": False, "resources": [], "error": None,
+                "status": "error", "elapsed_ms": None,
             }
             try:
                 resources = await self.list_resources(q)
                 entry["success"] = True
                 entry["resources"] = list(resources)
+                entry["status"] = "ok" if resources else "empty"
                 successful.append(iface)
                 for r in resources:
                     all_resources.append({
@@ -312,12 +353,30 @@ class VisaManager:
                     if cause else None
                 if code is not None:
                     err["code"] = int(code)
+                # v2.4.0: timeout を error と区別する。
+                # VisaTimeoutError / VI_ERROR_TMO / "timeout" 文言で判定。
+                is_timeout = (
+                    isinstance(e, VisaTimeoutError)
+                    or "VI_ERROR_TMO" in str(e).upper()
+                    or "TIMEOUT" in str(e).upper()
+                    or (code is not None and int(code) == -1073807339)
+                )
+                if is_timeout:
+                    entry["status"] = "timeout"
+                    err["error_class"] = "visa_interface_discovery_timeout"
+                    timed_out.append(iface)
+                else:
+                    entry["status"] = "error"
+                    failed.append(iface)
                 entry["error"] = err
-                failed.append(iface)
+            finally:
+                entry["elapsed_ms"] = round(
+                    (_time.monotonic() - t0) * 1000.0, 1)
             per_query.append(entry)
 
         any_success = bool(successful)
-        any_failure = bool(failed)
+        # timeout も failure 側として扱う (partial_success 判定用)
+        any_failure = bool(failed) or bool(timed_out)
         partial = any_success and any_failure
         # v2.1.1: 「list_resources は成功しているが resource が 1 件も
         # 列挙されていない」状態を検出 (device 切断 / 電源 / driver
@@ -345,7 +404,7 @@ class VisaManager:
             recommended.append(
                 "Try list_resources(query=\"USB?*\") to isolate USB "
                 "resources.")
-            if "GPIB" in failed:
+            if "GPIB" in failed or "GPIB" in timed_out:
                 recommended.append(
                     "Check NI-488.2 / GPIB controller if GPIB "
                     "discovery fails.")
@@ -353,6 +412,22 @@ class VisaManager:
                 "Check NI MAX for the failing interface.")
             recommended.append(
                 "Run pyvisa-info and verify the active VISA backend.")
+        if timed_out:
+            recommended.append(
+                "One or more interfaces timed out. The controller may "
+                "be busy or a device is holding the bus; retry after a "
+                "few seconds or power-cycle the affected interface.")
+
+        # v2.4.0: backend 情報 + interface 別 status 集計を追加。
+        try:
+            backend = self.backend_info()
+        except Exception:
+            backend = {"available": _PYVISA_AVAILABLE}
+
+        # interface ごとの最終 status を集計 (100 台規模の俯瞰用)
+        interface_status: dict[str, str] = {}
+        for entry in per_query:
+            interface_status[entry["interface"]] = entry["status"]
 
         return {
             "success": any_success,
@@ -364,6 +439,11 @@ class VisaManager:
                 "queries": per_query,
                 "successful_interfaces": successful,
                 "failed_interfaces": failed,
+                # v2.4.0 追加 (後方互換、既存 key は不変)
+                "timed_out_interfaces": timed_out,
+                "interface_status": interface_status,
+                "backend": backend,
+                "diagnostic_schema_version": "2.4",
             },
             "recommended_next_actions": recommended,
         }

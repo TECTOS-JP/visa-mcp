@@ -1,5 +1,67 @@
 # 変更履歴
 
+## v2.4.0 — discovery per-resource/per-interface diagnostic schema
+
+合言葉: **「1 台の GPIB エラーで全体像を見失わない」**
+
+### 背景
+
+レビューで挙がった「100 台規模では壊れた 1 台・1 バスが全体
+discovery を止めない設計、resource/interface ごとの ok/error/timeout
++ elapsed + backend がほしい」への対応 (v2.4 フェーズ開始)。
+
+`discover_resources_safe` は v2.1 で per-query 部分成功を返して
+いたが、(a) timeout と generic error が区別されない、(b) 所要時間が
+分からない、(c) backend 情報が無い、という課題があった。
+
+### 追加 (すべて後方互換)
+
+per-query (`data.queries[]`) に:
+- `status`: `"ok"` | `"empty"` | `"timeout"` | `"error"` の enum
+- `elapsed_ms`: その query の所要時間 (ms)
+
+top-level `data` に:
+- `timed_out_interfaces`: timeout した interface のリスト
+  (`failed_interfaces` とは別管理)
+- `interface_status`: `{interface: status}` の集計 (俯瞰用)
+- `backend`: `{available, pyvisa_version, backend}`
+  (例: visa32.dll / pyvisa 1.16.2)
+- `diagnostic_schema_version`: `"2.4"`
+
+`VisaManager.backend_info()` を新設 (診断用、pyvisa backend 識別)。
+
+### timeout 分類
+
+`VisaTimeoutError` / `VI_ERROR_TMO` / 文言 / error_code -1073807339 を
+timeout と判定し、`status="timeout"` +
+`error_class="visa_interface_discovery_timeout"` を付与。
+timeout 専用の recommended action も追加。
+
+### 実機検証
+
+```
+discover_resources_safe(["USB?*", "GPIB?*"])
+  USB:  status=ok elapsed_ms=111.4 resources=1
+  GPIB: status=ok elapsed_ms=198.9 resources=30
+  backend: {pyvisa 1.16.2, visa32.dll}
+  interface_status: {USB: ok, GPIB: ok}
+```
+
+### 互換性
+
+既存 key (`success` / `partial_success` / `empty_with_success` /
+`resources` / `resource_count` / `queries` /
+`successful_interfaces` / `failed_interfaces`) はすべて不変。
+per-query の旧 `success` / `resources` / `error` も維持。
+新 field は追加のみ。MCP tool 名 / 引数も不変。
+
+### おまけ: テスト UTF-8 固定 (Codex v2.3.6 レビュー P2)
+
+wheel build test の `subprocess.run` に `PYTHONUTF8=1` /
+`PYTHONIOENCODING=utf-8` を固定。Windows 非UTF-8 (cp932) 環境で
+`UnicodeDecodeError` で診断が崩れる問題を解消。
+
+
 ## v2.3.6 — Codex v2.3.5 レビュー対応 (resolver test 副作用除去 + build を dev dep に)
 
 合言葉: **「resolver test に server import は要らない (再掲)」**

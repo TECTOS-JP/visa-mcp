@@ -6,11 +6,26 @@ P2  : 「builtin が選ばれる」ことと「実際に definitions が load
        される」「wheel 同梱の整合性」を assert する。
 """
 from __future__ import annotations
+import os
 import shutil
 import subprocess
 import sys
 import zipfile
 from pathlib import Path
+
+
+def _utf8_env() -> dict:
+    """v2.3.7: `python -m build` の子プロセスを UTF-8 に固定する env。
+
+    Windows 非UTF-8 (cp932 等) 環境では build の出力 / decode が
+    UnicodeDecodeError になり、テストの失敗診断が崩れる
+    (Codex v2.3.6 レビュー P2)。`PYTHONUTF8=1` + `PYTHONIOENCODING=utf-8`
+    で安定させる。
+    """
+    env = dict(os.environ)
+    env["PYTHONUTF8"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
+    return env
 
 import pytest
 import yaml
@@ -167,6 +182,7 @@ def _try_build_wheel(out_dir: Path) -> Path | None:
         [sys.executable, "-m", "build", "--wheel",
          "--outdir", str(out_dir), str(REPO)],
         capture_output=True, text=True,
+        encoding="utf-8", errors="replace", env=_utf8_env(),
     )
     if res.returncode != 0:
         pytest.skip(f"wheel build 失敗 (CI 環境差?): {res.stderr[:200]}")
@@ -222,6 +238,7 @@ def test_wheel_build_succeeds_no_duplicate(tmp_path):
         [sys.executable, "-m", "build", "--wheel",
          "--outdir", str(tmp_path), str(REPO)],
         capture_output=True, text=True,
+        encoding="utf-8", errors="replace", env=_utf8_env(),
     )
     assert res.returncode == 0, (
         f"v2.3.5: wheel build が失敗 (P0 regression?):\n"

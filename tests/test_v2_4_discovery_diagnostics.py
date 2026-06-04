@@ -1,0 +1,151 @@
+"""v2.4.0: discovery per-resource/per-interface diagnostic schema.
+
+`discover_resources_safe` を拡張:
+- per-query `status` enum ("ok"/"empty"/"timeout"/"error")
+- per-query `elapsed_ms`
+- timeout を error と区別 (`timed_out_interfaces`)
+- top-level `backend` 情報
+- `interface_status` 集計
+すべて後方互換 (既存 key は不変)。
+"""
+from __future__ import annotations
+import asyncio
+
+import pytest
+
+from visa_mcp.visa_manager import (
+    VisaManager, VisaError, VisaTimeoutError, _PYVISA_AVAILABLE,
+)
+
+
+class _FakeVisaManager(VisaManager):
+    """list_resources を差し替えて discover_resources_safe を単体 test
+    する。pyvisa 未導入環境でも動くよう __init__ を override。"""
+
+    def __init__(self, behaviors: dict):
+        # 親 __init__ (pyvisa 必須) を呼ばずに最小初期化
+        self._rm = None
+        self._locks = {}
+        self._bus_manager = None
+        self._behaviors = behaviors  # query -> callable/raise spec
+
+    async def list_resources(self, query: str = "?*::INSTR"):
+        spec = self._behaviors.get(query)
+        if spec is None:
+            return []
+        if isinstance(spec, Exception):
+            raise spec
+        if callable(spec):
+            return spec()
+        return list(spec)
+
+    def backend_info(self) -> dict:
+        return {"available": True, "pyvisa_version": "x.y",
+                "backend": "@ni"}
+
+
+@pytest.mark.asyncio
+async def test_per_query_status_ok_and_empty():
+    mgr = _FakeVisaManager({
+        "USB?*": ["USB0::0x1::INSTR"],   # ok
+        "GPIB?*": [],                     # empty
+    })
+    res = await mgr.discover_resources_safe(["USB?*", "GPIB?*"])
+    q = {e["query"]: e for e in res["data"]["queries"]}
+    assert q["USB?*"]["status"] == "ok"
+    assert q["GPIB?*"]["status"] == "empty"
+    assert q["USB?*"]["elapsed_ms"] is not None
+    assert res["data"]["interface_status"] == {"USB": "ok", "GPIB": "empty"}
+
+
+@pytest.mark.asyncio
+async def test_timeout_classified_separately():
+    mgr = _FakeVisaManager({
+        "USB?*": ["USB0::INSTR"],
+        "GPIB?*": VisaTimeoutError("VI_ERROR_TMO: timeout expired"),
+    })
+    res = await mgr.discover_resources_safe(["USB?*", "GPIB?*"])
+    q = {e["query"]: e for e in res["data"]["queries"]}
+    assert q["GPIB?*"]["status"] == "timeout"
+    assert "GPIB" in res["data"]["timed_out_interfaces"]
+    assert "GPIB" not in res["data"]["failed_interfaces"]
+    assert res["partial_success"] is True
+    assert q["GPIB?*"]["error"]["error_class"] == (
+        "visa_interface_discovery_timeout")
+
+
+@pytest.mark.asyncio
+async def test_generic_error_classified_as_error():
+    mgr = _FakeVisaManager({
+        "USB?*": ["USB0::INSTR"],
+        "GPIB?*": VisaError("VI_ERROR_SYSTEM_ERROR (-1073807360)"),
+    })
+    res = await mgr.discover_resources_safe(["USB?*", "GPIB?*"])
+    q = {e["query"]: e for e in res["data"]["queries"]}
+    assert q["GPIB?*"]["status"] == "error"
+    assert "GPIB" in res["data"]["failed_interfaces"]
+    assert "GPIB" not in res["data"]["timed_out_interfaces"]
+    assert res["partial_success"] is True
+
+
+@pytest.mark.asyncio
+async def test_all_success():
+    mgr = _FakeVisaManager({
+        "USB?*": ["USB0::INSTR"],
+        "GPIB?*": ["GPIB0::2::INSTR"],
+    })
+    res = await mgr.discover_resources_safe(["USB?*", "GPIB?*"])
+    assert res["success"] is True
+    assert res["partial_success"] is False
+    assert res["data"]["resource_count"] == 2
+    assert res["data"]["timed_out_interfaces"] == []
+
+
+@pytest.mark.asyncio
+async def test_backend_info_in_response():
+    mgr = _FakeVisaManager({"USB?*": ["USB0::INSTR"]})
+    res = await mgr.discover_resources_safe(["USB?*"])
+    backend = res["data"]["backend"]
+    assert backend["available"] is True
+    assert backend["backend"] == "@ni"
+    assert res["data"]["diagnostic_schema_version"] == "2.4"
+
+
+@pytest.mark.asyncio
+async def test_backward_compatible_keys_present():
+    """既存 key (success/partial_success/empty_with_success/
+    resources/resource_count/queries/successful_interfaces/
+    failed_interfaces) が引き続き存在すること。"""
+    mgr = _FakeVisaManager({"USB?*": ["USB0::INSTR"]})
+    res = await mgr.discover_resources_safe(["USB?*"])
+    assert set(res) >= {
+        "success", "partial_success", "empty_with_success",
+        "data", "recommended_next_actions"}
+    assert set(res["data"]) >= {
+        "resources", "resource_count", "queries",
+        "successful_interfaces", "failed_interfaces"}
+
+
+@pytest.mark.asyncio
+async def test_timeout_recommended_action():
+    mgr = _FakeVisaManager({
+        "GPIB?*": VisaTimeoutError("timeout"),
+    })
+    res = await mgr.discover_resources_safe(["GPIB?*"])
+    joined = " ".join(res["recommended_next_actions"]).lower()
+    assert "timed out" in joined or "timeout" in joined
+
+
+@pytest.mark.asyncio
+async def test_elapsed_ms_is_numeric():
+    mgr = _FakeVisaManager({"USB?*": ["USB0::INSTR"]})
+    res = await mgr.discover_resources_safe(["USB?*"])
+    e = res["data"]["queries"][0]
+    assert isinstance(e["elapsed_ms"], (int, float))
+    assert e["elapsed_ms"] >= 0.0
+
+
+def test_v2_4_0_version():
+    import visa_mcp
+    parts = visa_mcp.__version__.split(".")
+    assert tuple(int(p) for p in parts[:3]) >= (2, 4, 0)

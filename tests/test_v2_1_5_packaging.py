@@ -201,3 +201,36 @@ def test_v2_1_5_version():
     import visa_mcp
     parts = visa_mcp.__version__.split(".")
     assert tuple(int(p) for p in parts[:3]) >= (2, 1, 5)
+
+
+def test_wheel_build_succeeds_no_duplicate(tmp_path):
+    """v2.3.5: `python -m build --wheel` が duplicate-file エラーで
+    落ちないこと (Codex v2.3.4 レビュー P0)。
+
+    v2.3.4 では force-include と packages の両方が
+    builtin_instruments/_system.yaml を追加していたため
+    `A second file is being added to the wheel archive at the same
+    path` で build が失敗 → pip install 不能だった。
+
+    このテストは build を実際に走らせ、returncode==0 を assert する。
+    `build` 未導入の CI のみ skip (失敗は skip しない)。
+    """
+    try:
+        import build  # noqa
+    except ImportError:
+        pytest.skip("`build` package が未インストールのため skip")
+    res = subprocess.run(
+        [sys.executable, "-m", "build", "--wheel",
+         "--outdir", str(tmp_path), str(REPO)],
+        capture_output=True, text=True,
+    )
+    assert res.returncode == 0, (
+        f"v2.3.5: wheel build が失敗 (P0 regression?):\n"
+        f"STDOUT:\n{res.stdout[-500:]}\n"
+        f"STDERR:\n{res.stderr[-1000:]}")
+    # duplicate エラー文言が出ていないこと
+    combined = (res.stdout + res.stderr).lower()
+    assert "second file is being added" not in combined, (
+        "v2.3.5: force-include 重複が再発している")
+    wheels = list(tmp_path.glob("visa_mcp-*.whl"))
+    assert wheels, "wheel が生成されていない"

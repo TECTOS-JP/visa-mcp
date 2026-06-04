@@ -1,5 +1,54 @@
 # 変更履歴
 
+## v2.3.5 — packaging P0 修正 (wheel build duplicate file)
+
+合言葉: **「packages と force-include で同じファイルを二度入れない」**
+
+### Codex v2.3.4 レビュー P0
+
+`pip install git+...@v2.3.4` が wheel build で失敗:
+
+```
+ValueError: A second file is being added to the wheel archive at the
+same path: `visa_mcp/builtin_instruments/_system.yaml`.
+```
+
+原因: `pyproject.toml` で
+- `[tool.hatch.build.targets.wheel] packages = ["src/visa_mcp"]`
+  → `src/visa_mcp/` 配下の全ファイル (builtin_instruments/*.yaml,
+    templates/*.yaml 含む) が既に wheel に入る
+- `[tool.hatch.build.targets.wheel.force-include]` でも
+  `builtin_instruments` / `templates` を追加していた
+
+→ 同一 path への二重追加で hatchling が build を中断。v2.1.4 で
+force-include を足したときから潜在していたが、`_system.yaml` を空に
+した v2.1.5 以降に顕在化した (Codex は v2.3.4 wheel で踏んだ)。
+
+### 修正
+
+- `pyproject.toml` から `[tool.hatch.build.targets.wheel.force-include]`
+  セクションを丸ごと削除。`packages = ["src/visa_mcp"]` だけで
+  templates / builtin_instruments の YAML は wheel に含まれる
+  (build 後の wheel を unzip して 3 + 4 ファイル確認済み)。
+
+### 検証
+
+- `python -m build --wheel` 成功 (duplicate エラー消滅)
+- wheel 内に `visa_mcp/builtin_instruments/{_system,kikusui_pmx35_3a,
+  yokogawa_7563}.yaml` (3) + `visa_mcp/templates/instruments/*.yaml`
+  (4) を確認
+- clean venv で `pip install <wheel>` 成功 →
+  `import visa_mcp` (2.3.5) + builtin YAML 3 件 load 確認
+- 新 test `test_wheel_build_succeeds_no_duplicate`: build を実走し
+  returncode==0 を assert (失敗は skip しない。P0 回帰検出用)
+
+### 互換性
+
+packaging のみの修正。コード / API は v2.3.4 と同一。
+`pip install git+https://github.com/TECTOS-JP/visa-mcp@v2.3.5` が
+通るようになる。
+
+
 ## v2.3.4 — Codex v2.3.3 レビュー対応 (persist 失敗の可視化 + clear 失敗の success=false)
 
 合言葉: **「保存できなかったら正直に言う」**

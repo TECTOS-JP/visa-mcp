@@ -111,7 +111,7 @@ v2.0 で完全に削除された API は無い。`DeprecationWarning` のみ。
 `lab-executor-mcp` 単独 install ではこれは正常。実機を使うなら:
 
 ```bash
-pip install visa-mcp
+pip install lab-visa-mcp
 ```
 
 ### v2.0 で動作しなくなった
